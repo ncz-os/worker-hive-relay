@@ -1,0 +1,18 @@
+[Unit]
+Description=node-relay enqueuer (home side) — hive jobs -> cloud relay bucket
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Adjust User/WorkingDirectory/venv path per host.
+User=jasonperlow
+WorkingDirectory=/home/jasonperlow/node-relay
+# Secrets via EnvironmentFile (mode 0600). See node_relay/setup_relay.sh.
+EnvironmentFile=/home/jasonperlow/.config/node-relay/relay.env
+ExecStart=/home/jasonperlow/node-relay/.venv/bin/python -m node_relay.enqueuer --interval 15
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

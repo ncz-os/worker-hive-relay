@@ -1,0 +1,26 @@
+[project]
+name = "node-relay"
+version = "0.2.0"
+description = "E2EE public-cloud object relay bridging network-isolated remote workers (any node with internet egress, no LAN/VPN) to the GRAEAE hive bus"
+requires-python = ">=3.10"
+dependencies = ["cryptography>=42.0.0", "requests>=2.31.0"]
+
+[project.optional-dependencies]
+# Pick the backend matching your bucket. Both are optional so a node only
+# installs the SDK it actually uses.
+gcs = ["google-cloud-storage>=2.16.0"]
+s3 = ["boto3>=1.34.0"]
+
+[project.scripts]
+node-relay-enqueuer = "node_relay.enqueuer:main"
+node-relay-reconciler = "node_relay.reconciler:main"
+node-relay-poller = "node_relay.node_poller:main"
+
+[tool.setuptools.packages.find]
+include = ["node_relay*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 110

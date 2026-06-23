@@ -1,0 +1,13 @@
+# node-relay runtime deps. Install on BOTH the home side and the remote node:
+#   pip install -r node_relay/requirements.txt
+#
+# Base deps (always):
+cryptography>=42.0.0
+requests>=2.31.0
+#
+# Transport backend — install EXACTLY ONE for the bucket you use:
+#   GCP:  pip install 'google-cloud-storage>=2.16.0'
+#   AWS:  pip install 'boto3>=1.34.0'
+# (Both backends auth via the standard SDK credential chain; the remote node
+#  does NOT need the gcloud/aws CLI — only the library + a key/role.)
+google-cloud-storage>=2.16.0

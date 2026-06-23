@@ -1,0 +1,16 @@
+[Unit]
+Description=node-relay reconciler (home side) — relay terminal/ -> land patch -> hive done
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=jasonperlow
+WorkingDirectory=/home/jasonperlow/node-relay
+EnvironmentFile=/home/jasonperlow/.config/node-relay/relay.env
+ExecStart=/home/jasonperlow/node-relay/.venv/bin/python -m node_relay.reconciler --interval 15
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
