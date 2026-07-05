@@ -10,7 +10,15 @@ import pytest
 
 from node_relay import enqueuer
 from node_relay.enqueuer import _node_should_offload
-from node_relay.node_poller import repo_url_for_kind, repo_aliases
+from node_relay.node_poller import AgenticRepoExecutor, repo_url_for_kind, repo_aliases
+
+
+class _DummyChat:
+    timeout = 1.0
+    default_model = "dummy"
+
+    def complete(self, **kwargs):  # pragma: no cover - not used by these tests
+        raise AssertionError("unexpected model call")
 
 
 class TestRepoUrlForKind:
@@ -70,6 +78,38 @@ class TestNodeShouldOffload:
     def test_unmapped_unhosted_commit_kind_released(self):
         assert _node_should_offload({"kind": "build:unknown"}) is False
         assert _node_should_offload({"kind": "fix:somerepo"}) is False
+
+
+class TestGitCredentialHandling:
+    def test_gitlab_token_uses_askpass_not_clone_url(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("GITLAB_TOKEN", "secret-token")
+        ex = AgenticRepoExecutor(_DummyChat())
+
+        url, env = ex._git_auth_for_url("https://gitlab.com/mnemos-os/mnemos.git", tmp_path)
+
+        assert url == "https://gitlab.com/mnemos-os/mnemos.git"
+        assert "secret-token" not in url
+        assert env is not None
+        assert env["NODE_RELAY_GIT_PASSWORD"] == "secret-token"
+        assert env["GIT_TERMINAL_PROMPT"] == "0"
+        assert env["GIT_CONFIG_KEY_0"] == "credential.helper"
+        assert env["GIT_CONFIG_VALUE_0"] == ""
+        assert (tmp_path / "git-askpass.sh").stat().st_mode & 0o777 == 0o700
+
+    def test_token_not_attached_for_non_fleet_owner(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("GITLAB_TOKEN", "secret-token")
+        ex = AgenticRepoExecutor(_DummyChat())
+
+        url, env = ex._git_auth_for_url("https://gitlab.com/attacker/project.git", tmp_path)
+
+        assert url == "https://gitlab.com/attacker/project.git"
+        assert env is None
+
+    def test_embedded_credentials_are_rejected(self, tmp_path):
+        ex = AgenticRepoExecutor(_DummyChat())
+
+        with pytest.raises(RuntimeError, match="embedded credentials"):
+            ex._git_auth_for_url("https://oauth2:secret@gitlab.com/mnemos-os/mnemos.git", tmp_path)
 
 
 if __name__ == "__main__":

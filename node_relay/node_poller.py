@@ -34,6 +34,15 @@ from .relay_client import RelayClient
 
 log = logging.getLogger("node_relay.poller")
 
+_ASKPASS_SCRIPT = """#!/bin/sh
+# node_relay poller GIT_ASKPASS helper: answers git's username/password
+# prompts from process-private env vars so tokens never appear in argv.
+case "$1" in
+  Username*) printf '%s' "$NODE_RELAY_GIT_USERNAME" ;;
+  Password*) printf '%s' "$NODE_RELAY_GIT_PASSWORD" ;;
+esac
+"""
+
 
 def _env(*names: str, default: str | None = None) -> str | None:
     """First set env var among ``names`` (current name preferred, legacy last)."""
@@ -319,8 +328,8 @@ class AgenticRepoExecutor:
         workdir = tempfile.mkdtemp(prefix="node-repo-")
         clone_dir = Path(workdir) / "repo"
         try:
-            clone_url = self._credentialed_url(repo_url)
-            self._git(["clone", "--depth", "1", clone_url, str(clone_dir)], cwd=Path(workdir))
+            clone_url, git_env = self._git_auth_for_url(repo_url, Path(workdir))
+            self._git(["clone", "--depth", "1", clone_url, str(clone_dir)], cwd=Path(workdir), env=git_env)
             tree = self._repo_tree(clone_dir)
             # Full-file replacement flow: (1) the model picks the files it needs,
             # (2) we feed it their FULL content, (3) it returns complete
@@ -621,13 +630,12 @@ class AgenticRepoExecutor:
         logging.warning("rejected non-allowlisted repo hint: %r", repo)
         return None
 
-    def _credentialed_url(self, repo_url: str) -> str:
+    def _git_auth_for_url(self, repo_url: str, askpass_dir: Path) -> tuple[str, dict[str, str] | None]:
         parsed = urlparse(repo_url)
-        if parsed.scheme != "https":
-            return repo_url
-        # Never re-credential a URL that already carries userinfo.
         if parsed.username or parsed.password:
-            return repo_url
+            raise RuntimeError(f"repo url carries embedded credentials, refusing: {_redact_secrets(repo_url)}")
+        if parsed.scheme != "https":
+            return repo_url, None
         # Normalise host (lowercase, drop trailing dot) before matching.
         host = (parsed.hostname or "").rstrip(".").lower()
         token = None
@@ -642,14 +650,16 @@ class AgenticRepoExecutor:
             token = os.environ.get("CODEBERG_TOKEN")
             username = os.environ.get("CODEBERG_USER", "jperlow")
         if not token or not username:
-            return repo_url
+            return repo_url, None
         # SECURITY: only attach a Git token when the repository is owned by a
         # known fleet org. Reject empty path segments and traversal so a
-        # crafted path cannot route credentials to an unexpected owner.
+        # crafted path cannot route credentials to an unexpected owner. The
+        # token is passed through askpass, not in the clone URL, so it does not
+        # leak through argv or get persisted in .git/config.
         segments = [seg for seg in parsed.path.split("/") if seg]
         if not segments or ".." in segments:
             logging.warning("refusing token: suspicious repo path %r", parsed.path)
-            return repo_url
+            return repo_url, None
         owner = segments[0]
         allowed_owners = {
             o.strip()
@@ -665,14 +675,27 @@ class AgenticRepoExecutor:
         }
         if owner not in allowed_owners:
             logging.warning("refusing to attach token for non-fleet owner: %s", owner)
-            return repo_url
-        netloc = f"{username}:{token}@{host}"
-        if parsed.port:
-            netloc += f":{parsed.port}"
-        return urlunparse((parsed.scheme, netloc, parsed.path, parsed.params, parsed.query, parsed.fragment))
+            return repo_url, None
+        askpass = askpass_dir / "git-askpass.sh"
+        fd = os.open(askpass, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o700)
+        with os.fdopen(fd, "w") as fh:
+            fh.write(_ASKPASS_SCRIPT)
+        env = dict(os.environ)
+        env.update(
+            GIT_ASKPASS=str(askpass),
+            GIT_TERMINAL_PROMPT="0",
+            NODE_RELAY_GIT_USERNAME=username,
+            NODE_RELAY_GIT_PASSWORD=token,
+            # Keep global credential helpers from supplying a different cached
+            # identity or persisting this relay token after a successful clone.
+            GIT_CONFIG_COUNT="1",
+            GIT_CONFIG_KEY_0="credential.helper",
+            GIT_CONFIG_VALUE_0="",
+        )
+        return urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, parsed.query, parsed.fragment)), env
 
     def _git(
-        self, args: list[str], *, cwd: Path, check: bool = True
+        self, args: list[str], *, cwd: Path, check: bool = True, env: dict[str, str] | None = None
     ) -> subprocess.CompletedProcess[str]:
         proc = subprocess.run(
             ["git", *args],
@@ -680,6 +703,7 @@ class AgenticRepoExecutor:
             capture_output=True,
             text=True,
             timeout=self.git_timeout,
+            env=env,
         )
         if check and proc.returncode != 0:
             raise RuntimeError(_redact_secrets(f"git {' '.join(args)} failed: {proc.stderr.strip() or proc.stdout.strip()}"))
