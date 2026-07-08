@@ -41,3 +41,19 @@ box). It has been generalized to any remote/airgapped node and renamed to
 `node_relay`. Every renamed environment variable falls back to its legacy
 `SPARK_*` name, and the crypto reader accepts blobs sealed with the old magic,
 so an in-place upgrade needs no flag-day cutover.
+
+
+## Build infrastructure & partners
+
+Continuous integration and package distribution for this project are generously
+supported by our open-source infrastructure partners:
+
+- **[GitLab](https://gitlab.com/)** — canonical source hosting and CI pipelines
+  (format / lint / test gates), via the
+  [GitLab for Open Source](https://about.gitlab.com/solutions/open-source/) program.
+- **[Buildkite](https://buildkite.com/)** — CI/CD orchestration with hosted macOS
+  and Linux agents, and our APT package registry host
+  (`packages.buildkite.com/ncz-os/ncz`), via the
+  [Buildkite Open Source](https://buildkite.com/pricing) program.
+
+Thank you to both for backing open-source software.
