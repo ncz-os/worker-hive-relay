@@ -83,7 +83,7 @@ def aad_for(kind: str, uuid: str) -> bytes:
     e.g. ``pending/<uuid>`` cannot be replayed as ``terminal/<uuid>`` or moved
     to a different job — the GCM tag covers ``kind`` and ``uuid``, so any
     mismatch fails authentication. ``kind`` is one of
-    ``pending``/``terminal``/``status``.
+    ``pending``/``claimant``/``terminal``/``status``.
     """
     return f"{kind}:{uuid}".encode("utf-8")
 

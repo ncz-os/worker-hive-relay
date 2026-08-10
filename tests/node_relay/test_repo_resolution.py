@@ -10,7 +10,7 @@ import pytest
 
 from node_relay import enqueuer
 from node_relay.enqueuer import _node_should_offload
-from node_relay.node_poller import AgenticRepoExecutor, repo_url_for_kind, repo_aliases
+from node_relay.node_poller import AgenticRepoExecutor, make_executor, repo_url_for_kind, repo_aliases
 
 
 class _DummyChat:
@@ -110,6 +110,39 @@ class TestGitCredentialHandling:
 
         with pytest.raises(RuntimeError, match="embedded credentials"):
             ex._git_auth_for_url("https://oauth2:secret@gitlab.com/mnemos-os/mnemos.git", tmp_path)
+
+
+class TestRepositoryExecutorPolicy:
+    def test_local_policy_keeps_repository_jobs_local(self, monkeypatch):
+        monkeypatch.setenv("CLOUD_LLM_BASE", "https://cloud.example/v1")
+        executor = make_executor("local")
+
+        assert executor.repo.chat.label == "local"
+
+    def test_explicit_allowlisted_repo_url_is_honored(self):
+        ex = AgenticRepoExecutor(_DummyChat())
+
+        assert ex._resolve_repo_url(
+            {"kind": "build:custom", "repo": "https://gitlab.com/mnemos-os/mnemos.git"}
+        ) == "https://gitlab.com/mnemos-os/mnemos.git"
+        assert ex._resolve_repo_url(
+            {"kind": "build:custom", "repo": "https://attacker.example/repo.git"}
+        ) is None
+
+    def test_pinned_model_is_used_for_both_agentic_calls(self):
+        calls = []
+
+        class Chat(_DummyChat):
+            def complete(self, **kwargs):
+                calls.append(kwargs)
+                return "file.py" if len(calls) == 1 else ""
+
+        ex = AgenticRepoExecutor(Chat())
+        job = {"prompt": "change it", "model": "submitter-model"}
+        ex._request_file_list(job, "file.py")
+        ex._request_changes(job, "file.py", "")
+
+        assert [call["model"] for call in calls] == ["submitter-model", "submitter-model"]
 
 
 if __name__ == "__main__":

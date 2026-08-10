@@ -5,11 +5,10 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-# Adjust User/WorkingDirectory/venv path per node. No vendor-specific defaults.
-User=relay
-WorkingDirectory=/home/relay/node-relay
-EnvironmentFile=/home/relay/.config/node-relay/relay.env
-ExecStart=/home/relay/node-relay/.venv/bin/python -m node_relay.node_poller --interval 10 --executor local+cloud
+User=@NODE_RELAY_USER@
+WorkingDirectory=@NODE_RELAY_REPO@
+EnvironmentFile=@NODE_RELAY_ENV@
+ExecStart=@NODE_RELAY_PYTHON@ -m node_relay.node_poller --interval 10 --executor local+cloud
 Restart=always
 RestartSec=10
 

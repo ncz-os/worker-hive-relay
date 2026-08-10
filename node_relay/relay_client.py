@@ -14,6 +14,7 @@ Bucket layout (every ``*.json.enc`` value is a sealed blob from
 :mod:`relay_crypto`; ``claimed/<uuid>`` holds a small JSON lease marker)::
 
     pending/<uuid>.json.enc     enqueuer (home) writes; remote node consumes
+    claimant/<uuid>.json.enc    authenticated hive claimant recovery envelope
     claimed/<uuid>              node conditional-creates = lease lock (exactly-once)
     terminal/<uuid>.json.enc    node writes done OR failed (status in payload);
                                 reconciler (home) consumes
@@ -37,6 +38,7 @@ from dataclasses import dataclass
 
 _PENDING = "pending/"
 _CLAIMED = "claimed/"
+_CLAIMANT = "claimant/"
 # Single terminal prefix (not split done/failed): one create-only object per job
 # is the exactly-once gate, so two workers can never record conflicting terminal
 # states for the same uuid. The done-vs-failed distinction lives in the sealed
@@ -310,6 +312,10 @@ class RelayClient:
     def put_pending(self, uuid: str, sealed: bytes) -> None:
         self._backend.put(f"{_PENDING}{uuid}{_SUFFIX}", sealed)
 
+    def put_claimant(self, uuid: str, sealed: bytes) -> None:
+        """Store the separately authenticated hive claimant routing envelope."""
+        self._backend.put(f"{_CLAIMANT}{uuid}{_SUFFIX}", sealed)
+
     # ---- node poller ----------------------------------------------------
     def list_pending(self) -> list[str]:
         n = len(_PENDING)
@@ -353,8 +359,49 @@ class RelayClient:
             return False  # lease still live
         return self._backend.cas_write(key, body, version)
 
+    def renew_claim(self, uuid: str, owner: str, *, now: float | None = None) -> bool:
+        """Renew an owned claim with an owner- and version-checked CAS."""
+        now = time.time() if now is None else now
+        key = f"{_CLAIMED}{uuid}"
+        existing = self._backend.read_with_version(key)
+        if existing is None:
+            return False
+        raw, version = existing
+        try:
+            marker = json.loads(raw)
+        except (ValueError, TypeError):
+            return False
+        if marker.get("owner") != owner:
+            return False
+        body = json.dumps({"owner": owner, "claimed_at": now}).encode("utf-8")
+        return self._backend.cas_write(key, body, version)
+
+    def owns_claim(
+        self,
+        uuid: str,
+        owner: str,
+        *,
+        lease_seconds: float = DEFAULT_LEASE_SECONDS,
+        now: float | None = None,
+    ) -> bool:
+        """Return whether ``owner`` still holds a live lease for ``uuid``."""
+        existing = self._backend.read_with_version(f"{_CLAIMED}{uuid}")
+        if existing is None:
+            return False
+        raw, _version = existing
+        try:
+            marker = json.loads(raw)
+            claimed_at = float(marker.get("claimed_at", 0))
+        except (ValueError, TypeError):
+            return False
+        now = time.time() if now is None else now
+        return marker.get("owner") == owner and now - claimed_at < lease_seconds
+
     def get_pending(self, uuid: str) -> bytes:
         return self._backend.read(f"{_PENDING}{uuid}{_SUFFIX}")
+
+    def get_claimant(self, uuid: str) -> bytes:
+        return self._backend.read(f"{_CLAIMANT}{uuid}{_SUFFIX}")
 
     def put_terminal(self, uuid: str, sealed: bytes) -> bool:
         """Write the single terminal object for a job, create-only.
@@ -389,6 +436,7 @@ class RelayClient:
         """Delete every object for a job across all prefixes. Idempotent."""
         for name in (
             f"{_PENDING}{uuid}{_SUFFIX}",
+            f"{_CLAIMANT}{uuid}{_SUFFIX}",
             f"{_CLAIMED}{uuid}",
             f"{_TERMINAL}{uuid}{_SUFFIX}",
         ):

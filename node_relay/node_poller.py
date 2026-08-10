@@ -24,13 +24,14 @@ import shutil
 import socket
 import subprocess
 import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Protocol
 from urllib.parse import urlparse, urlunparse
 
 from . import relay_crypto
-from .relay_client import RelayClient
+from .relay_client import DEFAULT_LEASE_SECONDS, RelayClient
 
 log = logging.getLogger("node_relay.poller")
 
@@ -290,6 +291,19 @@ class FallbackExecutor:
 
     def __init__(self, chain: list[tuple[str, OpenAIChatExecutor]]):
         self.chain = chain
+        self.label = "+".join(name for name, _ex in chain)
+        self.default_model = chain[0][1].default_model
+        self.timeout = chain[0][1].timeout
+
+    def complete(self, **kwargs) -> str:
+        errors = []
+        for name, ex in self.chain:
+            try:
+                return ex.complete(**kwargs)
+            except Exception as exc:  # noqa: BLE001 — try the next backend
+                log.warning("executor %s failed, trying next: %s", name, exc)
+                errors.append(f"{name}: {exc}")
+        raise RuntimeError("all executors failed: " + " | ".join(errors))
 
     def execute(self, job: dict) -> dict:
         errors = []
@@ -430,7 +444,10 @@ class AgenticRepoExecutor:
                 "branch": branch,
                 "repo": repo_url,
                 "files_changed": changed,
-                "metrics": {"backend": "cloud-agentic", "model": self.chat.default_model},
+                "metrics": {
+                    "backend": f"{self.chat.label}-agentic",
+                    "model": job.get("model") or self._agentic_model() or self.chat.default_model,
+                },
             }
         finally:
             shutil.rmtree(workdir, ignore_errors=True)
@@ -454,7 +471,10 @@ class AgenticRepoExecutor:
         )
         user = f"Repo tree:\n{tree}\n\nTask:\n{self._job_text(job)}"
         out = self.chat.complete(
-            system=system, user=user, model=self._agentic_model(), timeout=self.model_timeout
+            system=system,
+            user=user,
+            model=job.get("model") or self._agentic_model(),
+            timeout=self.model_timeout,
         )
         paths = []
         for line in out.splitlines():
@@ -502,7 +522,10 @@ class AgenticRepoExecutor:
         if feedback:
             user += f"\n\nCorrection: {feedback}"
         return self.chat.complete(
-            system=system, user=user, model=self._agentic_model(), timeout=self.model_timeout
+            system=system,
+            user=user,
+            model=job.get("model") or self._agentic_model(),
+            timeout=self.model_timeout,
         )
 
     # Tolerant framing: models sometimes drop the trailing === on the FILE
@@ -611,6 +634,9 @@ class AgenticRepoExecutor:
         return bad
 
     def _resolve_repo_url(self, job: dict) -> str | None:
+        supplied = job.get("repo")
+        if supplied and supplied in {url for url in repo_aliases().values() if url}:
+            return supplied
         # A repo: hint that doesn't resolve falls THROUGH to the kind map.
         hint = REPO_HINT_RE.search(self._job_text(job))
         if hint:
@@ -764,14 +790,6 @@ def _cloud_executor() -> OpenAIChatExecutor:
     )
 
 
-def _agentic_chat_executor() -> OpenAIChatExecutor:
-    """Backend for repo-editing work: prefer the configured cloud model (usually
-    a larger coder), else the local model."""
-    if _env("CLOUD_LLM_BASE"):
-        return _cloud_executor()
-    return _local_executor()
-
-
 def _make_chat_executor(name: str) -> Executor:
     if name == "local":
         return _local_executor()
@@ -786,73 +804,175 @@ def _make_chat_executor(name: str) -> Executor:
 
 def make_executor(name: str) -> Executor:
     chat = _make_chat_executor(name)
-    return DispatchingExecutor(chat, AgenticRepoExecutor(_agentic_chat_executor()))
+    return DispatchingExecutor(chat, AgenticRepoExecutor(chat))
 
 
 def _seal_terminal(uuid: str, payload: dict, key: bytes) -> bytes:
     return relay_crypto.seal(payload, key, aad=relay_crypto.aad_for("terminal", uuid))
 
 
+class _ClaimLease:
+    """Renew one claim while its potentially long-running executor is active."""
+
+    def __init__(self, relay: RelayClient, uuid: str, owner: str, lease_seconds: float):
+        self.relay = relay
+        self.uuid = uuid
+        self.owner = owner
+        self.lease_seconds = lease_seconds
+        self._stop = threading.Event()
+        self._lost = threading.Event()
+        self._renew_lock = threading.Lock()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._thread.join(timeout=1.0)
+
+    def _run(self) -> None:
+        interval = max(0.05, self.lease_seconds / 3.0)
+        while not self._stop.wait(interval):
+            if not self._renew():
+                return
+
+    def _renew(self) -> bool:
+        if self._lost.is_set():
+            return False
+        with self._renew_lock:
+            try:
+                renewed = self.relay.renew_claim(self.uuid, self.owner)
+            except Exception:  # noqa: BLE001 — loss is safer than a stale write
+                log.exception("claim renewal failed for %s", self.uuid)
+                renewed = False
+        if not renewed:
+            self._lost.set()
+            log.error("claim ownership lost for %s", self.uuid)
+        return renewed
+
+    def is_owned(self) -> bool:
+        # A fresh CAS both proves ownership and gives the terminal write a full
+        # lease window, rather than merely observing a nearly expired marker.
+        return self._renew()
+
+
 def _write_terminal(
-    relay: RelayClient, uuid: str, payload: dict, key: bytes, *, claimant: str | None = None
-) -> None:
+    relay: RelayClient,
+    uuid: str,
+    payload: dict,
+    key: bytes,
+    *,
+    claimant: str | None = None,
+    lease: _ClaimLease | None = None,
+) -> bool:
+    if lease is not None and not lease.is_owned():
+        log.error("refusing terminal write for %s after claim ownership was lost", uuid)
+        return False
     # Echo the claimant URN through so the reconciler can PATCH the hive as the
     # job's claimant (the enqueuer that claimed it).
     if claimant and "claimant_urn" not in payload:
         payload = {**payload, "claimant_urn": claimant}
     if not relay.put_terminal(uuid, _seal_terminal(uuid, payload, key)):
         log.warning("terminal for %s already existed — keeping first", uuid)
+        return False
+    return True
+
+
+def _read_claimant(relay: RelayClient, uuid: str, key: bytes) -> str | None:
+    try:
+        envelope = relay_crypto.open_blob(
+            relay.get_claimant(uuid), key, aad=relay_crypto.aad_for("claimant", uuid)
+        )
+    except Exception:  # noqa: BLE001 — caller retains pending object for inspection
+        log.exception("claimant envelope for %s is unavailable", uuid)
+        return None
+    claimant = envelope.get("claimant_urn")
+    return claimant if isinstance(claimant, str) and claimant else None
+
+
+def _process_claimed_job(
+    relay: RelayClient,
+    key: bytes,
+    executor: Executor,
+    uuid: str,
+    lease: _ClaimLease,
+) -> int:
+    try:
+        raw = relay.get_pending(uuid)
+    except Exception as exc:  # noqa: BLE001 — stale claim marker for a
+        # pending object already consumed/deleted (404). Skip, keep sweeping
+        # (must NOT propagate and kill the poller process).
+        log.warning("pending object for %s unreadable (%s) — skipping", uuid, exc)
+        return 0
+    try:
+        job = relay_crypto.open_blob(
+            raw, key, aad=relay_crypto.aad_for("pending", uuid)
+        )
+    except relay_crypto.RelayCryptoError as exc:
+        claimant = _read_claimant(relay, uuid, key)
+        if claimant is None:
+            log.error("undecryptable pending %s has no usable claimant — retaining", uuid)
+            return 0
+        log.exception("undecryptable pending %s — quarantining", uuid)
+        _write_terminal(
+            relay,
+            uuid,
+            {"status": "failed", "error": f"undecryptable pending: {exc}"},
+            key,
+            claimant=claimant,
+            lease=lease,
+        )
+        return 1
+    claimant = job.get("claimant_urn")
+    job.setdefault("job_id", uuid)
+    if job.get("job_id") not in (None, uuid):
+        log.error("payload job_id %r != object %s — quarantining", job.get("job_id"), uuid)
+        _write_terminal(
+            relay,
+            uuid,
+            {"status": "failed", "error": "job_id/object uuid mismatch"},
+            key,
+            claimant=claimant,
+            lease=lease,
+        )
+        return 1
+    try:
+        result = executor.execute(job)
+        result.setdefault("status", "done")
+        _write_terminal(relay, uuid, result, key, claimant=claimant, lease=lease)
+        log.info("executed %s sha=%s", uuid, result.get("commit_sha"))
+    except Exception as exc:  # noqa: BLE001 — report failure, keep polling
+        log.exception("execute %s failed", uuid)
+        _write_terminal(
+            relay,
+            uuid,
+            {"status": "failed", "error": str(exc)},
+            key,
+            claimant=claimant,
+            lease=lease,
+        )
+    return 1
 
 
 def run_once(relay: RelayClient, key: bytes, executor: Executor, *, owner: str | None = None) -> int:
     """One sweep of pending/. Returns number of jobs executed this sweep."""
     owner = owner or worker_id()
+    lease_seconds = float(
+        _env("NODE_RELAY_LEASE_SECONDS", "SPARK_LEASE_SECONDS", default=str(DEFAULT_LEASE_SECONDS))
+    )
     done = 0
     for uuid in relay.list_pending():
         if done >= MAX_PER_SWEEP:
             break
-        if not relay.claim(uuid, owner):
+        if not relay.claim(uuid, owner, lease_seconds=lease_seconds):
             continue  # another live worker owns it (or lease not yet expired)
+        lease = _ClaimLease(relay, uuid, owner, lease_seconds)
+        lease.start()
         try:
-            raw = relay.get_pending(uuid)
-        except Exception as exc:  # noqa: BLE001 — stale claim marker for a
-            # pending object already consumed/deleted (404). Skip, keep sweeping
-            # (must NOT propagate and kill the poller process).
-            log.warning("pending object for %s unreadable (%s) — skipping", uuid, exc)
-            continue
-        try:
-            job = relay_crypto.open_blob(
-                raw, key, aad=relay_crypto.aad_for("pending", uuid)
-            )
-        except relay_crypto.RelayCryptoError as exc:
-            # Don't strand the claim: record a durable terminal failure so the
-            # reconciler closes the job out instead of it blocking forever.
-            log.exception("undecryptable pending %s — quarantining", uuid)
-            _write_terminal(relay, uuid, {"status": "failed", "error": f"undecryptable pending: {exc}"}, key)
-            done += 1
-            continue
-        claimant = job.get("claimant_urn")
-        job.setdefault("job_id", uuid)
-        if job.get("job_id") not in (None, uuid):
-            log.error("payload job_id %r != object %s — quarantining", job.get("job_id"), uuid)
-            _write_terminal(
-                relay,
-                uuid,
-                {"status": "failed", "error": "job_id/object uuid mismatch"},
-                key,
-                claimant=claimant,
-            )
-            done += 1
-            continue
-        try:
-            result = executor.execute(job)
-            result.setdefault("status", "done")
-            _write_terminal(relay, uuid, result, key, claimant=claimant)
-            log.info("executed %s sha=%s", uuid, result.get("commit_sha"))
-        except Exception as exc:  # noqa: BLE001 — report failure, keep polling
-            log.exception("execute %s failed", uuid)
-            _write_terminal(relay, uuid, {"status": "failed", "error": str(exc)}, key, claimant=claimant)
-        done += 1
+            done += _process_claimed_job(relay, key, executor, uuid, lease)
+        finally:
+            lease.stop()
     return done
 
 

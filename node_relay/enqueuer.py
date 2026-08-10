@@ -118,7 +118,15 @@ def run_once(hive: HiveClient, relay: RelayClient, key: bytes) -> int:
             # object; the reconciler needs it to PATCH as the job's claimant (the
             # hive has no GET-single-job endpoint to look it up).
             payload["claimant_urn"] = hive.urn
+            claimant = relay_crypto.seal(
+                {"claimant_urn": hive.urn},
+                key,
+                aad=relay_crypto.aad_for("claimant", job_id),
+            )
             sealed = relay_crypto.seal(payload, key, aad=relay_crypto.aad_for("pending", job_id))
+            # Keep routing independently authenticated so a corrupt pending
+            # ciphertext can still be reported to the hive by its claimant.
+            relay.put_claimant(job_id, claimant)
             relay.put_pending(job_id, sealed)
             hive.patch_status(job_id, "running", result={"note": "offloaded to node-relay bucket"})
             log.info("enqueued %s (context=%d)", job_id, len(payload["context"]))

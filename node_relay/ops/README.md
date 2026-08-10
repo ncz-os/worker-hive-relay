@@ -44,6 +44,10 @@ MNEMOS_TOKEN=<mnemos bearer>
 
 ## Install (manual)
 
+The `.service` files contain `@NODE_RELAY_*@` placeholders. Replace each with
+the desired user, checkout, environment-file, and Python paths before copying,
+or use the bootstrap above to render them automatically.
+
 ```bash
 sudo cp node-relay-enqueuer.service node-relay-reconciler.service /etc/systemd/system/  # home
 sudo cp node-relay-poller.service /etc/systemd/system/                                  # node
@@ -52,10 +56,11 @@ sudo systemctl enable --now node-relay-enqueuer node-relay-reconciler           
 sudo systemctl enable --now node-relay-poller                                            # node
 ```
 
-Adjust `User=` / `WorkingDirectory=` / venv path per host (units assume a
-`~/node-relay` checkout with a `.venv`). Re-running `setup_relay.sh` is safe: it
-reinstalls a unit only when its content changed, then `daemon-reload`s and
-`enable --now`s.
+The checked-in units are templates. The bootstrap fills in the invoking user,
+checkout, environment file, and active virtual environment (or the checkout's
+`.venv`). Set `NODE_RELAY_SERVICE_USER` or `NODE_RELAY_SERVICE_PYTHON` to
+override those values. Re-running `setup_relay.sh` is safe: it reinstalls a unit
+only when its rendered content changed, then reloads and enables it.
 
 ## Backward compatibility
 

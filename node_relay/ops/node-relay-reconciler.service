@@ -5,10 +5,10 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=jasonperlow
-WorkingDirectory=/home/jasonperlow/node-relay
-EnvironmentFile=/home/jasonperlow/.config/node-relay/relay.env
-ExecStart=/home/jasonperlow/node-relay/.venv/bin/python -m node_relay.reconciler --interval 15
+User=@NODE_RELAY_USER@
+WorkingDirectory=@NODE_RELAY_REPO@
+EnvironmentFile=@NODE_RELAY_ENV@
+ExecStart=@NODE_RELAY_PYTHON@ -m node_relay.reconciler --interval 15
 Restart=always
 RestartSec=10
 

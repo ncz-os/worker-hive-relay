@@ -26,6 +26,14 @@ MNEMOS_TOKEN = os.environ.get("MNEMOS_TOKEN", "")
 _TIMEOUT = float(os.environ.get("RELAY_HTTP_TIMEOUT", "30"))
 
 
+class HiveClaimError(RuntimeError):
+    """The hive queue could not be queried reliably."""
+
+
+class MnemosSearchError(RuntimeError):
+    """MNEMOS context could not be retrieved reliably."""
+
+
 class HiveClient:
     """Minimal client for the hive endpoints the bridge needs.
 
@@ -113,8 +121,9 @@ class HiveClient:
         None if the queue is dry. Eligibility = job.eligible_hosts covers this
         agent's host (parsed from the URN at registration).
 
-        Never raises: any non-2xx (204 empty, 409 claim race, 403 stale, 5xx) is
-        treated as 'no claim this round' so the drain loop keeps running."""
+        A 204 or a 409 claim race means there is no claim this round. Transport,
+        authentication, server, and malformed-response failures raise
+        :class:`HiveClaimError` so the service loop enters backoff."""
         try:
             resp = self._session.post(
                 f"{self.base}/v1/jobs/next",
@@ -122,17 +131,22 @@ class HiveClient:
                 timeout=_TIMEOUT,
             )
         except requests.RequestException as exc:
-            log.warning("claim_next failed: %s", exc)
-            return None
+            raise HiveClaimError(f"claim_next transport failure: {exc}") from exc
         if resp.status_code == 204:
             return None
+        if resp.status_code == 409:
+            return None
         if resp.status_code >= 400:
-            log.warning("claim_next %s: %s", resp.status_code, resp.text[:200])
-            return None
+            raise HiveClaimError(
+                f"claim_next HTTP {resp.status_code}: {resp.text[:200]}"
+            )
         try:
-            return resp.json() or None
-        except ValueError:
-            return None
+            data = resp.json()
+        except ValueError as exc:
+            raise HiveClaimError("claim_next returned malformed JSON") from exc
+        if not isinstance(data, dict) or not data:
+            raise HiveClaimError("claim_next returned an invalid job payload")
+        return data
 
     def patch_status(
         self,
@@ -181,11 +195,12 @@ class HiveClient:
 
 
 def mnemos_search(query: str, limit: int = 6) -> list[dict[str, Any]]:
-    """Retrieve relevant MNEMOS context for context-prepackaging (fail-soft).
+    """Retrieve relevant MNEMOS context for context-prepackaging.
 
-    Returns a list of ``{"id", "content"}`` dicts. On any failure returns ``[]``
-    rather than blocking the job — the node prompt degrades gracefully to no
-    injected context. Endpoint/shape per the MNEMOS HTTP API (Bearer auth).
+    Returns a list of ``{"id", "content"}`` dicts. A legitimate empty result
+    returns ``[]``; transport, authentication, and malformed-response failures
+    raise :class:`MnemosSearchError` so they cannot masquerade as empty context.
+    Endpoint/shape per the MNEMOS HTTP API (Bearer auth).
     """
     if not query.strip():
         return []
@@ -200,9 +215,15 @@ def mnemos_search(query: str, limit: int = 6) -> list[dict[str, Any]]:
         resp.raise_for_status()
         data = resp.json()
     except (requests.RequestException, ValueError) as exc:
-        log.warning("mnemos_search failed (degrading to no context): %s", exc)
-        return []
-    rows = data.get("memories", data) if isinstance(data, dict) else data
+        raise MnemosSearchError(f"mnemos_search failed: {exc}") from exc
+    if isinstance(data, dict):
+        rows = data.get("memories")
+    elif isinstance(data, list):
+        rows = data
+    else:
+        rows = None
+    if not isinstance(rows, list):
+        raise MnemosSearchError("mnemos_search returned an invalid response payload")
     out: list[dict[str, Any]] = []
     for r in rows or []:
         if isinstance(r, dict) and r.get("content"):

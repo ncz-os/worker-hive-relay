@@ -7,6 +7,7 @@ implements the same conditional-create + CAS primitives both real backends do.
 
 import base64
 import json
+import time
 
 import pytest
 
@@ -93,6 +94,14 @@ def test_expired_lease_taken_over(relay):
     assert json.loads(body)["owner"] == "worker-b"
 
 
+def test_claim_renewal_is_owner_and_version_checked(relay):
+    assert relay.claim("u1", "worker-a", now=1000.0) is True
+    assert relay.renew_claim("u1", "worker-b", now=1010.0) is False
+    assert relay.renew_claim("u1", "worker-a", now=1010.0) is True
+    assert relay.owns_claim("u1", "worker-a", now=1050.0, lease_seconds=100) is True
+    assert relay.claim("u1", "worker-b", now=1050.0, lease_seconds=100) is False
+
+
 def test_terminal_is_create_only(relay):
     a = relay_crypto.seal({"status": "done"}, KEY, aad=relay_crypto.aad_for("terminal", "u1"))
     b = relay_crypto.seal({"status": "failed"}, KEY, aad=relay_crypto.aad_for("terminal", "u1"))
@@ -104,11 +113,13 @@ def test_terminal_is_create_only(relay):
 
 def test_purge_is_idempotent(relay):
     relay.put_pending("u1", b"x")
+    relay.put_claimant("u1", b"routing")
     relay.claim("u1", "w")
     relay.put_terminal("u1", relay_crypto.seal({"status": "done"}, KEY, aad=relay_crypto.aad_for("terminal", "u1")))
     relay.purge("u1")
     assert relay.list_pending() == []
     assert relay.list_terminal() == []
+    assert relay._backend.read_opt("claimant/u1.json.enc") is None
     relay.purge("u1")  # second purge must not raise
     relay.purge("never-existed")
 
@@ -118,6 +129,46 @@ def test_status_overwrite_latest_wins(relay):
     relay.put_status("node-x-gpu", b"v2")
     assert relay.get_status("node-x-gpu") == b"v2"
     assert relay.get_status("absent") is None
+
+
+def test_long_execution_renews_claim_and_prevents_takeover(relay, monkeypatch):
+    from node_relay.node_poller import run_once
+
+    monkeypatch.setenv("NODE_RELAY_LEASE_SECONDS", "0.12")
+    job = {"job_id": "u1", "prompt": "work", "kind": "research:test", "claimant_urn": "urn:hive"}
+    relay.put_pending(
+        "u1", relay_crypto.seal(job, KEY, aad=relay_crypto.aad_for("pending", "u1"))
+    )
+
+    class SlowExecutor:
+        def execute(self, _job):
+            time.sleep(0.2)
+            assert relay.claim("u1", "worker-b", lease_seconds=0.12) is False
+            return {"status": "done"}
+
+    assert run_once(relay, KEY, SlowExecutor(), owner="worker-a") == 1
+    assert relay.list_terminal() == ["u1"]
+
+
+def test_lost_owner_cannot_write_terminal(relay, monkeypatch):
+    from node_relay.node_poller import run_once
+
+    monkeypatch.setenv("NODE_RELAY_LEASE_SECONDS", "10")
+    job = {"job_id": "u1", "prompt": "work", "kind": "research:test", "claimant_urn": "urn:hive"}
+    relay.put_pending(
+        "u1", relay_crypto.seal(job, KEY, aad=relay_crypto.aad_for("pending", "u1"))
+    )
+
+    class OwnershipStealingExecutor:
+        def execute(self, _job):
+            body, version = relay._backend.read_with_version("claimed/u1")
+            assert json.loads(body)["owner"] == "worker-a"
+            replacement = json.dumps({"owner": "worker-b", "claimed_at": time.time()}).encode()
+            assert relay._backend.cas_write("claimed/u1", replacement, version)
+            return {"status": "done"}
+
+    assert run_once(relay, KEY, OwnershipStealingExecutor(), owner="worker-a") == 1
+    assert relay.list_terminal() == []
 
 
 if __name__ == "__main__":

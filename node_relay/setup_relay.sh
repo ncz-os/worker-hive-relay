@@ -17,7 +17,11 @@ ROLE="${1:-env-only}"
 CFG_DIR="${NODE_RELAY_CONFIG_DIR:-$HOME/.config/node-relay}"
 ENV_FILE="$CFG_DIR/relay.env"
 UNIT_SRC="$(cd "$(dirname "$0")/ops" && pwd)"
+REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 PY="${PYTHON:-python3}"
+SERVICE_USER="${NODE_RELAY_SERVICE_USER:-$(id -un)}"
+SERVICE_PY="${NODE_RELAY_SERVICE_PYTHON:-${VIRTUAL_ENV:+$VIRTUAL_ENV/bin/python}}"
+SERVICE_PY="${SERVICE_PY:-$REPO_DIR/.venv/bin/python}"
 
 log() { printf '[node-relay setup] %s\n' "$*"; }
 
@@ -120,18 +124,39 @@ EOF
 }
 
 install_unit() {
-  # Idempotent system-unit install: copy only if changed, reload, enable+start.
+  # Render host-specific values, then install only if content changed.
   local unit="$1"
   local src="$UNIT_SRC/$unit"
   local dst="/etc/systemd/system/$unit"
+  local rendered
   [ -f "$src" ] || { log "missing unit $src"; return 1; }
-  if [ -f "$dst" ] && cmp -s "$src" "$dst"; then
+  [ -x "$SERVICE_PY" ] || {
+    log "service Python is not executable: $SERVICE_PY (create .venv or set NODE_RELAY_SERVICE_PYTHON)"
+    return 1
+  }
+  rendered="$(mktemp)"
+  "$PY" - "$src" "$rendered" "$SERVICE_USER" "$REPO_DIR" "$ENV_FILE" "$SERVICE_PY" <<'EOF'
+import pathlib, sys
+src, dst, user, repo, env_file, python = sys.argv[1:]
+text = pathlib.Path(src).read_text()
+values = {
+    "@NODE_RELAY_USER@": user,
+    "@NODE_RELAY_REPO@": repo,
+    "@NODE_RELAY_ENV@": env_file,
+    "@NODE_RELAY_PYTHON@": python,
+}
+for token, value in values.items():
+    text = text.replace(token, value)
+pathlib.Path(dst).write_text(text)
+EOF
+  if [ -f "$dst" ] && cmp -s "$rendered" "$dst"; then
     log "$unit unchanged"
   else
     log "installing $unit"
-    sudo cp "$src" "$dst"
+    sudo install -m 0644 "$rendered" "$dst"
     sudo systemctl daemon-reload
   fi
+  rm -f "$rendered"
   sudo systemctl enable --now "$unit"
 }
 
