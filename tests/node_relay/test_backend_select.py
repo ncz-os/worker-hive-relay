@@ -1,6 +1,11 @@
 """node-relay backend selection: gs://, s3://, bare name, explicit override,
 and legacy env fallback. Pure config logic — constructs no live client."""
 
+import importlib.metadata
+import re
+import tomllib
+from pathlib import Path
+
 import pytest
 
 from node_relay.relay_client import RelayConfig
@@ -66,6 +71,30 @@ def test_missing_bucket_raises(monkeypatch):
     _clear(monkeypatch)
     with pytest.raises(RuntimeError):
         RelayConfig.from_env()
+
+
+def test_s3_extra_requires_sdk_with_conditional_put_members():
+    pyproject = tomllib.loads((Path(__file__).parents[2] / "pyproject.toml").read_text())
+    requirement = pyproject["project"]["optional-dependencies"]["s3"][0]
+    match = re.fullmatch(r"boto3>=(\d+)\.(\d+)\.(\d+)", requirement)
+    assert match, requirement
+    declared_minimum = tuple(int(part) for part in match.groups())
+    assert declared_minimum >= (1, 36, 0)
+
+    try:
+        installed = tuple(
+            int(part) for part in importlib.metadata.version("boto3").split(".")[:3]
+        )
+    except importlib.metadata.PackageNotFoundError:
+        return
+    if installed < declared_minimum:
+        return  # this environment did not install the declared optional extra
+
+    import botocore.session
+
+    model = botocore.session.get_session().get_service_model("s3")
+    members = model.operation_model("PutObject").input_shape.members
+    assert {"IfNoneMatch", "IfMatch"} <= set(members)
 
 
 if __name__ == "__main__":

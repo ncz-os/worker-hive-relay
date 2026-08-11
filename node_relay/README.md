@@ -38,7 +38,7 @@ server. The single terminal object per job is likewise create-only.
 pip install -r node_relay/requirements.txt        # base
 pip install 'google-cloud-storage>=2.16.0'         # GCP backend
 # or
-pip install 'boto3>=1.34.0'                        # AWS / S3 backend
+pip install 'boto3>=1.36.0'                        # AWS / S3 backend
 ```
 
 Or, from a checkout: `pip install '.[gcs]'` / `pip install '.[s3]'`.

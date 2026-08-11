@@ -11,6 +11,7 @@ import logging
 import os
 import time
 from typing import Any
+from urllib.parse import quote
 
 import requests
 
@@ -28,6 +29,10 @@ _TIMEOUT = float(os.environ.get("RELAY_HTTP_TIMEOUT", "30"))
 
 class HiveClaimError(RuntimeError):
     """The hive queue could not be queried reliably."""
+
+
+class HiveRegistrationError(RuntimeError):
+    """The relay agent could not be registered with Hive."""
 
 
 class MnemosSearchError(RuntimeError):
@@ -92,11 +97,15 @@ class HiveClient:
                 timeout=_TIMEOUT,
             )
             resp.raise_for_status()
-            assigned = (resp.json() or {}).get("urn")
-            if assigned:
-                self.urn = assigned
+            data = resp.json()
+            if not isinstance(data, dict):
+                raise ValueError("register response was not an object")
+            assigned = data.get("urn")
+            if not isinstance(assigned, str) or not assigned:
+                raise ValueError("register response did not include an assigned urn")
+            self.urn = assigned
         except (requests.RequestException, ValueError) as exc:
-            log.warning("hive register failed (non-fatal): %s", exc)
+            raise HiveRegistrationError(f"hive register failed: {exc}") from exc
 
     def heartbeat(self, status: str = "online", metadata: dict[str, Any] | None = None) -> None:
         """Keep the agent active. The hive reaps agents to 'stale' after ~90s
@@ -121,7 +130,7 @@ class HiveClient:
         None if the queue is dry. Eligibility = job.eligible_hosts covers this
         agent's host (parsed from the URN at registration).
 
-        A 204 or a 409 claim race means there is no claim this round. Transport,
+        Only 204 means there is no claim this round. State conflicts, transport,
         authentication, server, and malformed-response failures raise
         :class:`HiveClaimError` so the service loop enters backoff."""
         try:
@@ -133,8 +142,6 @@ class HiveClient:
         except requests.RequestException as exc:
             raise HiveClaimError(f"claim_next transport failure: {exc}") from exc
         if resp.status_code == 204:
-            return None
-        if resp.status_code == 409:
             return None
         if resp.status_code >= 400:
             raise HiveClaimError(
@@ -229,6 +236,30 @@ def mnemos_search(query: str, limit: int = 6) -> list[dict[str, Any]]:
         if isinstance(r, dict) and r.get("content"):
             out.append({"id": r.get("id"), "content": r["content"]})
     return out
+
+
+def mnemos_get(memory_id: str) -> dict[str, Any]:
+    """Retrieve one explicitly referenced MNEMOS memory by id.
+
+    Exact references are mandatory job context, so missing, inaccessible, or
+    malformed memories raise instead of silently degrading to semantic search.
+    """
+    if not isinstance(memory_id, str) or not memory_id:
+        raise MnemosSearchError("mnemos_get requires a non-empty memory id")
+    headers = {"Authorization": f"Bearer {MNEMOS_TOKEN}"} if MNEMOS_TOKEN else {}
+    try:
+        resp = requests.get(
+            f"{MNEMOS_BASE}/v1/memories/{quote(memory_id, safe='')}",
+            headers=headers,
+            timeout=_TIMEOUT,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except (requests.RequestException, ValueError) as exc:
+        raise MnemosSearchError(f"mnemos_get {memory_id!r} failed: {exc}") from exc
+    if not isinstance(data, dict) or not isinstance(data.get("content"), str):
+        raise MnemosSearchError(f"mnemos_get {memory_id!r} returned an invalid response payload")
+    return {"id": data.get("id") or memory_id, "content": data["content"]}
 
 
 def backoff_sleep(attempt: int, base: float = 2.0, cap: float = 60.0) -> None:

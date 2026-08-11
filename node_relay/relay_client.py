@@ -47,6 +47,7 @@ _TERMINAL = "terminal/"
 # Out-of-band status objects (e.g. node telemetry). Overwrite-allowed (latest
 # wins), unlike the create-only terminal/claimed objects.
 _STATUS = "status/"
+_ACTIVE = "status/active/"
 _SUFFIX = ".json.enc"
 
 # A claim older than this (seconds) is considered abandoned (worker died
@@ -432,6 +433,14 @@ class RelayClient:
         """Read a status object, or None if absent."""
         return self._backend.read_opt(f"{_STATUS}{name}{_SUFFIX}")
 
+    def put_active(self, uuid: str, sealed: bytes) -> None:
+        """Publish the latest authenticated activity marker for one job."""
+        self._backend.put(f"{_ACTIVE}{uuid}{_SUFFIX}", sealed)
+
+    def get_active(self, uuid: str) -> bytes | None:
+        """Read a job activity marker, or None if the node has not started it."""
+        return self._backend.read_opt(f"{_ACTIVE}{uuid}{_SUFFIX}")
+
     def purge(self, uuid: str) -> None:
         """Delete every object for a job across all prefixes. Idempotent."""
         for name in (
@@ -439,5 +448,6 @@ class RelayClient:
             f"{_CLAIMANT}{uuid}{_SUFFIX}",
             f"{_CLAIMED}{uuid}",
             f"{_TERMINAL}{uuid}{_SUFFIX}",
+            f"{_ACTIVE}{uuid}{_SUFFIX}",
         ):
             self._backend.delete(name)

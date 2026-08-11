@@ -18,7 +18,7 @@ import os
 import time
 
 from . import relay_crypto
-from .bridge_common import HiveClient, backoff_sleep, mnemos_search
+from .bridge_common import HiveClaimError, HiveClient, backoff_sleep, mnemos_get, mnemos_search
 from .node_poller import NONCOMMIT_PREFIXES, repo_url_for_kind
 from .relay_client import RelayClient
 
@@ -38,6 +38,7 @@ def _env(*names: str, default: str | None = None) -> str | None:
 # operators set NODE_RELAY_HOST per node. (Legacy SPARK_GPU_HOST still honored.)
 NODE_HOST = _env("NODE_RELAY_HOST", "SPARK_GPU_HOST")
 CONTEXT_LIMIT = 6
+HIVE_LEASE_SECONDS = float(_env("NODE_RELAY_HIVE_LEASE_SECONDS", default="1800"))
 
 
 def _require_host() -> str:
@@ -52,14 +53,36 @@ def _require_host() -> str:
 def build_payload(job: dict) -> dict:
     """Shape the sealed job the node will execute. Pre-packages MNEMOS context."""
     prompt = job.get("prompt") or job.get("task") or job.get("description", "")
-    context = mnemos_search(prompt, limit=CONTEXT_LIMIT)
+    exact_context = [mnemos_get(memory_id) for memory_id in (job.get("mnemos_refs") or [])]
+    exact_ids = {memory.get("id") for memory in exact_context}
+    semantic_context = [
+        memory
+        for memory in mnemos_search(prompt, limit=CONTEXT_LIMIT)
+        if memory.get("id") not in exact_ids
+    ]
+    context = exact_context + semantic_context
+    claimed_resources = job.get("claimed_resources") or {}
+    claimed_model = claimed_resources.get("model") if isinstance(claimed_resources, dict) else None
+    preferred_models = job.get("preferred_models") or []
+    execution_model = claimed_model if claimed_model not in (None, "", "unknown") else None
+    if execution_model is None:
+        execution_model = next(
+            (model for model in preferred_models if isinstance(model, str) and model),
+            None,
+        )
     return {
         "job_id": job["id"],
         "kind": job.get("kind"),  # poller KIND_WORKSPACE_MAP needs it for repo mapping
         "prompt": prompt,
-        # No hardcoded model: the node executor picks (local primary, cloud
-        # fallback). A submitter MAY pin one via the job's model field.
-        "model": job.get("claimed_model") or job.get("model"),
+        # Use the model Hive actually selected. Relay agents commonly register
+        # as "unknown", in which case the first ranked Hive preference becomes
+        # the node's deliberate execution choice.
+        "model": execution_model,
+        # Both supported Hive variants persist and dequeue ``project``. Treat
+        # it as the cross-version structured workspace identifier; the newer
+        # target_workspace name is accepted when a Hive begins forwarding it.
+        "workspace": job.get("target_workspace") or job.get("project"),
+        # Backward compatibility for relay producers predating workspace.
         "repo": job.get("repo"),
         "branch": job.get("branch"),
         "context": context,
@@ -164,6 +187,45 @@ def gpu_metadata(relay: RelayClient, key: bytes) -> dict:
     }
 
 
+def renew_active_jobs(hive: HiveClient, relay: RelayClient, key: bytes) -> int:
+    """Refresh Hive claims for authenticated, recently active remote jobs.
+
+    Activity lives in the bucket, so a restarted enqueuer can resume renewal
+    for work that is still executing instead of relying on process memory.
+    """
+    renewed = 0
+    now = time.time()
+    for job_id in relay.list_pending():
+        raw = relay.get_active(job_id)
+        if raw is None:
+            continue
+        name = f"active/{job_id}"
+        try:
+            activity = relay_crypto.open_blob(
+                raw, key, aad=relay_crypto.aad_for("status", name)
+            )
+            if activity.get("job_id") != job_id:
+                raise ValueError("activity job_id does not match object name")
+            updated_at = float(activity["updated_at"])
+            claimant = activity["claimant_urn"]
+            if not isinstance(claimant, str) or not claimant:
+                raise ValueError("activity has no claimant_urn")
+        except (relay_crypto.RelayCryptoError, KeyError, TypeError, ValueError) as exc:
+            log.warning("invalid activity marker for %s: %s", job_id, exc)
+            continue
+        if now - updated_at >= HIVE_LEASE_SECONDS:
+            continue
+        if not hive.patch_status(
+            job_id,
+            "running",
+            result={"note": "active on node-relay worker"},
+            claimed_by=claimant,
+        ):
+            raise HiveClaimError(f"failed to renew active Hive job {job_id}")
+        renewed += 1
+    return renewed
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="node-relay enqueuer (home side)")
     ap.add_argument("--interval", type=float, default=15.0, help="poll seconds")
@@ -184,6 +246,7 @@ def main() -> None:
     hive.register(metadata=gpu_metadata(relay, key))
 
     if args.once:
+        renew_active_jobs(hive, relay, key)
         run_once(hive, relay, key)
         return
 
@@ -192,6 +255,7 @@ def main() -> None:
         try:
             # heartbeat carries fresh remote GPU telemetry -> dashboard GPU panel
             hive.heartbeat(metadata=gpu_metadata(relay, key))
+            renew_active_jobs(hive, relay, key)
             run_once(hive, relay, key)
             attempt = 0
             time.sleep(args.interval)

@@ -634,6 +634,9 @@ class AgenticRepoExecutor:
         return bad
 
     def _resolve_repo_url(self, job: dict) -> str | None:
+        workspace = job.get("workspace")
+        if workspace in repo_aliases():
+            return repo_aliases()[workspace]
         supplied = job.get("repo")
         if supplied and supplied in {url for url in repo_aliases().values() if url}:
             return supplied
@@ -812,13 +815,22 @@ def _seal_terminal(uuid: str, payload: dict, key: bytes) -> bytes:
 
 
 class _ClaimLease:
-    """Renew one claim while its potentially long-running executor is active."""
+    """Renew bucket and Hive-facing activity while an executor is active."""
 
-    def __init__(self, relay: RelayClient, uuid: str, owner: str, lease_seconds: float):
+    def __init__(
+        self,
+        relay: RelayClient,
+        uuid: str,
+        owner: str,
+        lease_seconds: float,
+        key: bytes,
+    ):
         self.relay = relay
         self.uuid = uuid
         self.owner = owner
         self.lease_seconds = lease_seconds
+        self.key = key
+        self.claimant: str | None = None
         self._stop = threading.Event()
         self._lost = threading.Event()
         self._renew_lock = threading.Lock()
@@ -832,10 +844,40 @@ class _ClaimLease:
         self._thread.join(timeout=1.0)
 
     def _run(self) -> None:
-        interval = max(0.05, self.lease_seconds / 3.0)
+        progress_seconds = float(
+            _env("NODE_RELAY_PROGRESS_SECONDS", default="300")
+        )
+        hive_lease_seconds = float(
+            _env("NODE_RELAY_HIVE_LEASE_SECONDS", default="1800")
+        )
+        interval = max(
+            0.05,
+            min(self.lease_seconds / 3.0, hive_lease_seconds / 3.0, progress_seconds),
+        )
         while not self._stop.wait(interval):
             if not self._renew():
                 return
+
+    def set_claimant(self, claimant: str | None) -> None:
+        """Publish activity immediately once the authenticated job is open."""
+        self.claimant = claimant if isinstance(claimant, str) and claimant else None
+        if self.claimant is not None:
+            self._publish_activity()
+
+    def _publish_activity(self) -> None:
+        if self.claimant is None:
+            return
+        name = f"active/{self.uuid}"
+        payload = {
+            "job_id": self.uuid,
+            "claimant_urn": self.claimant,
+            "owner": self.owner,
+            "updated_at": time.time(),
+        }
+        self.relay.put_active(
+            self.uuid,
+            relay_crypto.seal(payload, self.key, aad=relay_crypto.aad_for("status", name)),
+        )
 
     def _renew(self) -> bool:
         if self._lost.is_set():
@@ -843,6 +885,8 @@ class _ClaimLease:
         with self._renew_lock:
             try:
                 renewed = self.relay.renew_claim(self.uuid, self.owner)
+                if renewed:
+                    self._publish_activity()
             except Exception:  # noqa: BLE001 — loss is safer than a stale write
                 log.exception("claim renewal failed for %s", self.uuid)
                 renewed = False
@@ -937,6 +981,7 @@ def _process_claimed_job(
             lease=lease,
         )
         return 1
+    lease.set_claimant(claimant)
     try:
         result = executor.execute(job)
         result.setdefault("status", "done")
@@ -967,7 +1012,7 @@ def run_once(relay: RelayClient, key: bytes, executor: Executor, *, owner: str |
             break
         if not relay.claim(uuid, owner, lease_seconds=lease_seconds):
             continue  # another live worker owns it (or lease not yet expired)
-        lease = _ClaimLease(relay, uuid, owner, lease_seconds)
+        lease = _ClaimLease(relay, uuid, owner, lease_seconds, key)
         lease.start()
         try:
             done += _process_claimed_job(relay, key, executor, uuid, lease)

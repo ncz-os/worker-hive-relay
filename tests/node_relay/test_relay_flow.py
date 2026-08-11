@@ -116,10 +116,12 @@ def test_purge_is_idempotent(relay):
     relay.put_claimant("u1", b"routing")
     relay.claim("u1", "w")
     relay.put_terminal("u1", relay_crypto.seal({"status": "done"}, KEY, aad=relay_crypto.aad_for("terminal", "u1")))
+    relay.put_active("u1", b"active")
     relay.purge("u1")
     assert relay.list_pending() == []
     assert relay.list_terminal() == []
     assert relay._backend.read_opt("claimant/u1.json.enc") is None
+    assert relay.get_active("u1") is None
     relay.purge("u1")  # second purge must not raise
     relay.purge("never-existed")
 
@@ -148,6 +150,12 @@ def test_long_execution_renews_claim_and_prevents_takeover(relay, monkeypatch):
 
     assert run_once(relay, KEY, SlowExecutor(), owner="worker-a") == 1
     assert relay.list_terminal() == ["u1"]
+    activity = relay_crypto.open_blob(
+        relay.get_active("u1"), KEY, aad=relay_crypto.aad_for("status", "active/u1")
+    )
+    assert activity["job_id"] == "u1"
+    assert activity["claimant_urn"] == "urn:hive"
+    assert activity["owner"] == "worker-a"
 
 
 def test_lost_owner_cannot_write_terminal(relay, monkeypatch):

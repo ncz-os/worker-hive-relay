@@ -129,6 +129,13 @@ class TestRepositoryExecutorPolicy:
             {"kind": "build:custom", "repo": "https://attacker.example/repo.git"}
         ) is None
 
+    def test_structured_workspace_alias_is_honored(self):
+        ex = AgenticRepoExecutor(_DummyChat())
+
+        assert ex._resolve_repo_url(
+            {"kind": "build:custom", "workspace": "mnemos"}
+        ) == "https://gitlab.com/mnemos-os/mnemos.git"
+
     def test_pinned_model_is_used_for_both_agentic_calls(self):
         calls = []
 
