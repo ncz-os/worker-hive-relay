@@ -618,15 +618,18 @@ class AgenticRepoExecutor:
             if rel.startswith(("/", "~")) or ".." in Path(rel).parts or rel.startswith(".git/"):
                 bad.append(rel)
                 continue
-            p = (clone_dir / rel).resolve()
+            p = clone_dir / rel
             try:
-                p.relative_to(root)
+                p.parent.resolve().relative_to(root)
             except ValueError:
                 bad.append(rel)
                 continue
             if body is None:
                 p.unlink(missing_ok=True)
             else:
+                if p.is_symlink():
+                    bad.append(rel)
+                    continue
                 p.parent.mkdir(parents=True, exist_ok=True)
                 if not body.endswith("\n"):
                     body += "\n"
@@ -831,6 +834,7 @@ class _ClaimLease:
         self.lease_seconds = lease_seconds
         self.key = key
         self.claimant: str | None = None
+        self.claimant_token: str | None = None
         self._stop = threading.Event()
         self._lost = threading.Event()
         self._renew_lock = threading.Lock()
@@ -858,9 +862,12 @@ class _ClaimLease:
             if not self._renew():
                 return
 
-    def set_claimant(self, claimant: str | None) -> None:
+    def set_claimant(self, claimant: str | None, claimant_token: str | None = None) -> None:
         """Publish activity immediately once the authenticated job is open."""
         self.claimant = claimant if isinstance(claimant, str) and claimant else None
+        self.claimant_token = (
+            claimant_token if isinstance(claimant_token, str) and claimant_token else None
+        )
         if self.claimant is not None:
             self._publish_activity()
 
@@ -874,6 +881,8 @@ class _ClaimLease:
             "owner": self.owner,
             "updated_at": time.time(),
         }
+        if self.claimant_token:
+            payload["claimant_token"] = self.claimant_token
         self.relay.put_active(
             self.uuid,
             relay_crypto.seal(payload, self.key, aad=relay_crypto.aad_for("status", name)),
@@ -908,6 +917,7 @@ def _write_terminal(
     key: bytes,
     *,
     claimant: str | None = None,
+    claimant_token: str | None = None,
     lease: _ClaimLease | None = None,
 ) -> bool:
     if lease is not None and not lease.is_owned():
@@ -917,13 +927,15 @@ def _write_terminal(
     # job's claimant (the enqueuer that claimed it).
     if claimant and "claimant_urn" not in payload:
         payload = {**payload, "claimant_urn": claimant}
+    if claimant_token and "_claimant_token" not in payload:
+        payload = {**payload, "_claimant_token": claimant_token}
     if not relay.put_terminal(uuid, _seal_terminal(uuid, payload, key)):
         log.warning("terminal for %s already existed — keeping first", uuid)
         return False
     return True
 
 
-def _read_claimant(relay: RelayClient, uuid: str, key: bytes) -> str | None:
+def _read_claimant(relay: RelayClient, uuid: str, key: bytes) -> tuple[str, str | None] | None:
     try:
         envelope = relay_crypto.open_blob(
             relay.get_claimant(uuid), key, aad=relay_crypto.aad_for("claimant", uuid)
@@ -932,7 +944,14 @@ def _read_claimant(relay: RelayClient, uuid: str, key: bytes) -> str | None:
         log.exception("claimant envelope for %s is unavailable", uuid)
         return None
     claimant = envelope.get("claimant_urn")
-    return claimant if isinstance(claimant, str) and claimant else None
+    if not isinstance(claimant, str) or not claimant:
+        return None
+    claimant_token = envelope.get("claimant_token")
+    if claimant_token is not None and (
+        not isinstance(claimant_token, str) or not claimant_token
+    ):
+        return None
+    return claimant, claimant_token
 
 
 def _process_claimed_job(
@@ -954,10 +973,11 @@ def _process_claimed_job(
             raw, key, aad=relay_crypto.aad_for("pending", uuid)
         )
     except relay_crypto.RelayCryptoError as exc:
-        claimant = _read_claimant(relay, uuid, key)
-        if claimant is None:
+        claimant_route = _read_claimant(relay, uuid, key)
+        if claimant_route is None:
             log.error("undecryptable pending %s has no usable claimant — retaining", uuid)
             return 0
+        claimant, claimant_token = claimant_route
         log.exception("undecryptable pending %s — quarantining", uuid)
         _write_terminal(
             relay,
@@ -965,10 +985,12 @@ def _process_claimed_job(
             {"status": "failed", "error": f"undecryptable pending: {exc}"},
             key,
             claimant=claimant,
+            claimant_token=claimant_token,
             lease=lease,
         )
         return 1
     claimant = job.get("claimant_urn")
+    claimant_token = job.pop("_claimant_token", None)
     job.setdefault("job_id", uuid)
     if job.get("job_id") not in (None, uuid):
         log.error("payload job_id %r != object %s — quarantining", job.get("job_id"), uuid)
@@ -978,14 +1000,23 @@ def _process_claimed_job(
             {"status": "failed", "error": "job_id/object uuid mismatch"},
             key,
             claimant=claimant,
+            claimant_token=claimant_token,
             lease=lease,
         )
         return 1
-    lease.set_claimant(claimant)
+    lease.set_claimant(claimant, claimant_token)
     try:
         result = executor.execute(job)
         result.setdefault("status", "done")
-        _write_terminal(relay, uuid, result, key, claimant=claimant, lease=lease)
+        _write_terminal(
+            relay,
+            uuid,
+            result,
+            key,
+            claimant=claimant,
+            claimant_token=claimant_token,
+            lease=lease,
+        )
         log.info("executed %s sha=%s", uuid, result.get("commit_sha"))
     except Exception as exc:  # noqa: BLE001 — report failure, keep polling
         log.exception("execute %s failed", uuid)
@@ -995,6 +1026,7 @@ def _process_claimed_job(
             {"status": "failed", "error": str(exc)},
             key,
             claimant=claimant,
+            claimant_token=claimant_token,
             lease=lease,
         )
     return 1

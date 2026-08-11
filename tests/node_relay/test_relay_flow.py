@@ -179,5 +179,35 @@ def test_lost_owner_cannot_write_terminal(relay, monkeypatch):
     assert relay.list_terminal() == []
 
 
+def test_claimant_token_is_routed_but_not_exposed_to_executor(relay):
+    from node_relay.node_poller import run_once
+
+    job = {
+        "job_id": "u1",
+        "prompt": "work",
+        "kind": "research:test",
+        "claimant_urn": "urn:hive",
+        "_claimant_token": "agent-session-token",
+    }
+    relay.put_pending(
+        "u1", relay_crypto.seal(job, KEY, aad=relay_crypto.aad_for("pending", "u1"))
+    )
+
+    class Executor:
+        def execute(self, opened_job):
+            assert "_claimant_token" not in opened_job
+            return {"status": "done"}
+
+    assert run_once(relay, KEY, Executor(), owner="worker-a") == 1
+    activity = relay_crypto.open_blob(
+        relay.get_active("u1"), KEY, aad=relay_crypto.aad_for("status", "active/u1")
+    )
+    terminal = relay_crypto.open_blob(
+        relay.get_terminal("u1"), KEY, aad=relay_crypto.aad_for("terminal", "u1")
+    )
+    assert activity["claimant_token"] == "agent-session-token"
+    assert terminal["_claimant_token"] == "agent-session-token"
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

@@ -113,6 +113,30 @@ class TestGitCredentialHandling:
 
 
 class TestRepositoryExecutorPolicy:
+    def test_delete_unlinks_repository_symlink_not_its_target(self, tmp_path):
+        ex = AgenticRepoExecutor(_DummyChat())
+        target = tmp_path / "configs" / "prod.conf"
+        target.parent.mkdir()
+        target.write_text("production=true\n")
+        link = tmp_path / "current.conf"
+        link.symlink_to("configs/prod.conf")
+
+        assert ex._write_file_changes(tmp_path, {"current.conf": None}) == []
+        assert not link.exists()
+        assert not link.is_symlink()
+        assert target.read_text() == "production=true\n"
+
+    def test_replacement_of_repository_symlink_is_rejected(self, tmp_path):
+        ex = AgenticRepoExecutor(_DummyChat())
+        target = tmp_path / "target.txt"
+        target.write_text("original\n")
+        link = tmp_path / "link.txt"
+        link.symlink_to("target.txt")
+
+        assert ex._write_file_changes(tmp_path, {"link.txt": "replacement"}) == ["link.txt"]
+        assert link.is_symlink()
+        assert target.read_text() == "original\n"
+
     def test_local_policy_keeps_repository_jobs_local(self, monkeypatch):
         monkeypatch.setenv("CLOUD_LLM_BASE", "https://cloud.example/v1")
         executor = make_executor("local")

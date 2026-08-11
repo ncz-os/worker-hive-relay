@@ -38,6 +38,9 @@ class _Session:
     def post(self, *args, **kwargs):
         return self.response
 
+    def patch(self, *args, **kwargs):
+        return self.response
+
 
 def _hive_with_response(response):
     hive = HiveClient("urn:test", runtime="test", kind="test", host="host")
@@ -96,6 +99,40 @@ def test_registration_requires_and_adopts_server_urn():
     hive = _hive_with_response(_Response(200, payload={"urn": "urn:assigned"}))
     hive.register()
     assert hive.urn == "urn:assigned"
+
+
+def test_registration_adopts_agent_token_for_identity_bound_hive_calls():
+    hive = _hive_with_response(
+        _Response(200, payload={"urn": "urn:assigned", "agent_token": "session-token"})
+    )
+    hive.register()
+
+    assert hive.agent_token == "session-token"
+
+    calls = []
+
+    class Session:
+        def post(self, *args, **kwargs):
+            calls.append(("post", kwargs))
+            return _Response(204)
+
+        def patch(self, *args, **kwargs):
+            calls.append(("patch", kwargs))
+            return _Response(200)
+
+    hive._session = Session()
+    assert hive.claim_next() is None
+    assert hive.patch_status("job-1", "running") is True
+    assert [call[1]["headers"] for call in calls] == [
+        {"Authorization": "Bearer session-token"},
+        {"Authorization": "Bearer session-token"},
+    ]
+
+
+def test_required_heartbeat_rejection_is_fatal():
+    hive = _hive_with_response(_Response(403, text="wrong agent"))
+    with pytest.raises(HiveClaimError, match="urn:old"):
+        hive.heartbeat(urn="urn:old", agent_token="old-token", required=True)
 
 
 def test_mnemos_get_resolves_exact_reference(monkeypatch):

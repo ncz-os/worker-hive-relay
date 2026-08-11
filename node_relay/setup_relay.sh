@@ -66,24 +66,52 @@ EOF
 ensure_key() {
   # Generate a 32-byte AES key ONLY if one is not already set. Idempotent: a
   # second run sees the key and does nothing (so both sides keep the SAME key).
+  local primary_count
+  primary_count="$(grep -cE '^NODE_RELAY_E2EE_KEY=' "$ENV_FILE" || true)"
+  if [ "$primary_count" -gt 1 ]; then
+    log "multiple NODE_RELAY_E2EE_KEY assignments in $ENV_FILE — refusing to choose one"
+    return 1
+  fi
   if grep -qE '^NODE_RELAY_E2EE_KEY=.+' "$ENV_FILE"; then
     log "E2EE key already present — not regenerating"
     return
   fi
   local key
-  key="$($PY - <<'EOF'
+  local migrated=0
+  if grep -qE '^SPARK_HIVE_RELAY_E2EE_KEY=.+' "$ENV_FILE"; then
+    key="$(sed -n 's/^SPARK_HIVE_RELAY_E2EE_KEY=//p' "$ENV_FILE" | head -n 1)"
+    log "migrating legacy SPARK_HIVE_RELAY_E2EE_KEY without rotating it"
+    migrated=1
+  else
+    key="$($PY - <<'EOF'
 import base64, os
 print(base64.b64encode(os.urandom(32)).decode())
 EOF
 )"
+  fi
   # Replace the empty assignment in place.
   tmp="$(mktemp)"
-  sed "s|^NODE_RELAY_E2EE_KEY=.*|NODE_RELAY_E2EE_KEY=$key|" "$ENV_FILE" > "$tmp"
+  if [ "$primary_count" -eq 1 ]; then
+    sed "s|^NODE_RELAY_E2EE_KEY=.*|NODE_RELAY_E2EE_KEY=$key|" "$ENV_FILE" > "$tmp"
+  else
+    cp "$ENV_FILE" "$tmp"
+    printf '\nNODE_RELAY_E2EE_KEY=%s\n' "$key" >> "$tmp"
+  fi
+  if [ "$(grep -cE '^NODE_RELAY_E2EE_KEY=.+' "$tmp" || true)" -ne 1 ] || \
+     ! grep -qFx "NODE_RELAY_E2EE_KEY=$key" "$tmp"; then
+    log "failed to write exactly one NODE_RELAY_E2EE_KEY assignment"
+    rm -f "$tmp"
+    return 1
+  fi
   cat "$tmp" > "$ENV_FILE"
   rm -f "$tmp"
   chmod 600 "$ENV_FILE"
-  log "generated NODE_RELAY_E2EE_KEY — COPY THIS SAME VALUE to the other side:"
-  log "  $key"
+  if [ "$migrated" -eq 1 ]; then
+    log "set NODE_RELAY_E2EE_KEY from the existing legacy key"
+  else
+    log "generated NODE_RELAY_E2EE_KEY — COPY THIS SAME VALUE to the other side:"
+    log "  $key"
+  fi
 }
 
 ensure_bucket() {

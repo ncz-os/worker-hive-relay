@@ -141,8 +141,14 @@ def run_once(hive: HiveClient, relay: RelayClient, key: bytes) -> int:
             # object; the reconciler needs it to PATCH as the job's claimant (the
             # hive has no GET-single-job endpoint to look it up).
             payload["claimant_urn"] = hive.urn
+            agent_token = getattr(hive, "agent_token", None)
+            if agent_token:
+                payload["_claimant_token"] = agent_token
+            claimant_route = {"claimant_urn": hive.urn}
+            if agent_token:
+                claimant_route["claimant_token"] = agent_token
             claimant = relay_crypto.seal(
-                {"claimant_urn": hive.urn},
+                claimant_route,
                 key,
                 aad=relay_crypto.aad_for("claimant", job_id),
             )
@@ -210,16 +216,27 @@ def renew_active_jobs(hive: HiveClient, relay: RelayClient, key: bytes) -> int:
             claimant = activity["claimant_urn"]
             if not isinstance(claimant, str) or not claimant:
                 raise ValueError("activity has no claimant_urn")
+            claimant_token = activity.get("claimant_token")
+            if claimant_token is not None and (
+                not isinstance(claimant_token, str) or not claimant_token
+            ):
+                raise ValueError("activity has an invalid claimant_token")
         except (relay_crypto.RelayCryptoError, KeyError, TypeError, ValueError) as exc:
             log.warning("invalid activity marker for %s: %s", job_id, exc)
             continue
         if now - updated_at >= HIVE_LEASE_SECONDS:
             continue
+        hive.heartbeat(
+            urn=claimant,
+            agent_token=claimant_token,
+            required=True,
+        )
         if not hive.patch_status(
             job_id,
             "running",
             result={"note": "active on node-relay worker"},
             claimed_by=claimant,
+            agent_token=claimant_token,
         ):
             raise HiveClaimError(f"failed to renew active Hive job {job_id}")
         renewed += 1

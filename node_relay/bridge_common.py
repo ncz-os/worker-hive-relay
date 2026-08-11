@@ -70,6 +70,7 @@ class HiveClient:
         self.capabilities = capabilities
         self.provider = provider
         self.model = model
+        self.agent_token: str | None = None
         self._session = requests.Session()
         if HIVE_BUS_TOKEN:
             self._session.headers["Authorization"] = f"Bearer {HIVE_BUS_TOKEN}"
@@ -104,26 +105,49 @@ class HiveClient:
             if not isinstance(assigned, str) or not assigned:
                 raise ValueError("register response did not include an assigned urn")
             self.urn = assigned
+            agent_token = data.get("agent_token")
+            if agent_token is not None and (not isinstance(agent_token, str) or not agent_token):
+                raise ValueError("register response included an invalid agent token")
+            self.agent_token = agent_token
         except (requests.RequestException, ValueError) as exc:
             raise HiveRegistrationError(f"hive register failed: {exc}") from exc
 
-    def heartbeat(self, status: str = "online", metadata: dict[str, Any] | None = None) -> None:
+    @staticmethod
+    def _agent_headers(agent_token: str | None) -> dict[str, str] | None:
+        return {"Authorization": f"Bearer {agent_token}"} if agent_token else None
+
+    def heartbeat(
+        self,
+        status: str = "online",
+        metadata: dict[str, Any] | None = None,
+        *,
+        urn: str | None = None,
+        agent_token: str | None = None,
+        required: bool = False,
+    ) -> bool:
         """Keep the agent active. The hive reaps agents to 'stale' after ~90s
         without a heartbeat, after which dequeue stops offering work — so the
         loops must call this every iteration (interval < the stale window).
         ``metadata`` (e.g. {"load": {"gpus_runtime": [...]}}) is merged
         server-side so /v1/hosts shows fresh GPU telemetry."""
-        body: dict[str, Any] = {"urn": self.urn, "status": status}
+        target_urn = urn or self.urn
+        token = agent_token if urn is not None else (agent_token or self.agent_token)
+        body: dict[str, Any] = {"urn": target_urn, "status": status}
         if metadata:
             body["metadata"] = metadata
         try:
             self._session.post(
                 f"{self.base}/v1/agents/heartbeat",
                 json=body,
+                headers=self._agent_headers(token),
                 timeout=_TIMEOUT,
             ).raise_for_status()
+            return True
         except requests.RequestException as exc:
+            if required:
+                raise HiveClaimError(f"hive heartbeat failed for {target_urn}: {exc}") from exc
             log.warning("heartbeat failed (non-fatal): %s", exc)
+            return False
 
     def claim_next(self) -> dict[str, Any] | None:
         """Atomically dequeue+claim the next job this agent is eligible for, or
@@ -137,6 +161,7 @@ class HiveClient:
             resp = self._session.post(
                 f"{self.base}/v1/jobs/next",
                 params={"agent_urn": self.urn},
+                headers=self._agent_headers(self.agent_token),
                 timeout=_TIMEOUT,
             )
         except requests.RequestException as exc:
@@ -162,6 +187,7 @@ class HiveClient:
         *,
         result: dict[str, Any] | None = None,
         claimed_by: str | None = None,
+        agent_token: str | None = None,
     ) -> bool:
         """PATCH a job to ``status`` per the JobUpdate contract. Non-status data
         (commit_sha, branch, metrics, error) goes inside ``result``.
@@ -170,7 +196,13 @@ class HiveClient:
         403. The reconciler (a different agent than the enqueuer that claimed the
         job) passes the job's actual claimant; the enqueuer omits it and defaults
         to its own URN (it is the claimant)."""
-        code = self.patch_status_code(job_id, status, result=result, claimed_by=claimed_by)
+        code = self.patch_status_code(
+            job_id,
+            status,
+            result=result,
+            claimed_by=claimed_by,
+            agent_token=agent_token,
+        )
         return code is not None and 200 <= code < 300
 
     def patch_status_code(
@@ -180,6 +212,7 @@ class HiveClient:
         *,
         result: dict[str, Any] | None = None,
         claimed_by: str | None = None,
+        agent_token: str | None = None,
     ) -> int | None:
         """Like :meth:`patch_status` but returns the HTTP status code (or None
         on a network-level failure) so callers can distinguish validation
@@ -189,7 +222,13 @@ class HiveClient:
         if result is not None:
             body["result"] = result
         try:
-            resp = self._session.patch(f"{self.base}/v1/jobs/{job_id}", json=body, timeout=_TIMEOUT)
+            token = agent_token or (self.agent_token if claimed_by in (None, self.urn) else None)
+            resp = self._session.patch(
+                f"{self.base}/v1/jobs/{job_id}",
+                json=body,
+                headers=self._agent_headers(token),
+                timeout=_TIMEOUT,
+            )
             if resp.status_code >= 400:
                 log.error(
                     "patch_status %s -> %s rejected %s: %s",

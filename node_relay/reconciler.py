@@ -79,17 +79,27 @@ def _reconcile_one(
     # it under a different URN than this reconciler and echoed that URN through
     # the terminal payload, so PATCH as that claimant.
     claimant = payload.get("claimant_urn")
+    claimant_token = payload.get("_claimant_token")
     failed = status == "failed"
     if failed:
         result = {"error": payload.get("error", "node failure")}
         if _json_size_bytes(result) > MAX_RESULT_BYTES:
             result = {"error": "payload_too_large"}
-        ok = hive.patch_status(uuid, "failed", result=result, claimed_by=claimant)
+        ok = hive.patch_status(
+            uuid,
+            "failed",
+            result=result,
+            claimed_by=claimant,
+            agent_token=claimant_token,
+        )
     else:
         # Pass the FULL node terminal payload through to the hive result so the
         # agentic executor's patch / suggestion / needs_review / files_changed
         # survive the round-trip. Strip only the routing field.
-        result = {k: v for k, v in payload.items() if k != "claimant_urn"}
+        result = {
+            k: v for k, v in payload.items()
+            if k not in {"claimant_urn", "_claimant_token"}
+        }
         result["needs_review"] = (status == "needs-review") or bool(payload.get("needs_review"))
 
         # LANDER (2026-06-08): a needs-review payload with a patch must land as
@@ -137,15 +147,33 @@ def _reconcile_one(
         # 408/409/423/429 (transient or state conflicts), 5xx, network — must
         # retry on the next sweep, never double-PATCH a review job to done.
         if result["needs_review"]:
-            code = hive.patch_status_code(uuid, "needs-review", result=result, claimed_by=claimant)
+            code = hive.patch_status_code(
+                uuid,
+                "needs-review",
+                result=result,
+                claimed_by=claimant,
+                agent_token=claimant_token,
+            )
             if code is not None and 200 <= code < 300:
                 ok = True
             elif code in (400, 422):
-                ok = hive.patch_status(uuid, "done", result=result, claimed_by=claimant)
+                ok = hive.patch_status(
+                    uuid,
+                    "done",
+                    result=result,
+                    claimed_by=claimant,
+                    agent_token=claimant_token,
+                )
             else:
                 ok = False
         else:
-            ok = hive.patch_status(uuid, "done", result=result, claimed_by=claimant)
+            ok = hive.patch_status(
+                uuid,
+                "done",
+                result=result,
+                claimed_by=claimant,
+                agent_token=claimant_token,
+            )
     if not ok:
         log.error("hive PATCH for %s failed — leaving bucket objects for retry", uuid)
         return False
@@ -176,9 +204,9 @@ def main() -> None:
 
     key = relay_crypto.load_key()
     hive = HiveClient(
-        urn="urn:agent:mnemos:pythia:node-relay-reconciler",
-        runtime="mnemos",
-        kind="mnemos",
+        urn="urn:agent:system:pythia:node-relay-reconciler",
+        runtime="system",
+        kind="system",
         host="pythia",
         capabilities=["*"],
     )
