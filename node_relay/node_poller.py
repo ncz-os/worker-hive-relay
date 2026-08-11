@@ -160,6 +160,22 @@ def repo_url_for_kind(kind: str | None) -> str | None:
     return None
 
 
+def repo_url_for_job(job: dict) -> str | None:
+    """Resolve every allowlisted repository form accepted in a relay job."""
+    workspace = job.get("workspace") or job.get("target_workspace") or job.get("project")
+    aliases = repo_aliases()
+    if workspace in aliases:
+        return aliases[workspace]
+    supplied = job.get("repo")
+    if supplied and supplied in {url for url in aliases.values() if url}:
+        return supplied
+    prompt = job.get("prompt") or job.get("task") or job.get("description") or ""
+    hint = REPO_HINT_RE.search(str(prompt))
+    if hint and aliases.get(hint.group("repo")):
+        return aliases[hint.group("repo")]
+    return repo_url_for_kind(job.get("kind"))
+
+
 def worker_id() -> str:
     return _env("NODE_WORKER_ID", "SPARK_WORKER_ID") or socket.gethostname()
 
@@ -637,19 +653,7 @@ class AgenticRepoExecutor:
         return bad
 
     def _resolve_repo_url(self, job: dict) -> str | None:
-        workspace = job.get("workspace")
-        if workspace in repo_aliases():
-            return repo_aliases()[workspace]
-        supplied = job.get("repo")
-        if supplied and supplied in {url for url in repo_aliases().values() if url}:
-            return supplied
-        # A repo: hint that doesn't resolve falls THROUGH to the kind map.
-        hint = REPO_HINT_RE.search(self._job_text(job))
-        if hint:
-            url = self._repo_hint_to_url(hint.group("repo"))
-            if url:
-                return url
-        return repo_url_for_kind(job.get("kind"))
+        return repo_url_for_job(job)
 
     def _repo_hint_to_url(self, repo: str) -> str | None:
         # SECURITY: job-supplied repo targets are allowlist-only. Raw URLs and
@@ -862,14 +866,17 @@ class _ClaimLease:
             if not self._renew():
                 return
 
-    def set_claimant(self, claimant: str | None, claimant_token: str | None = None) -> None:
+    def set_claimant(self, claimant: str | None, claimant_token: str | None = None) -> bool:
         """Publish activity immediately once the authenticated job is open."""
         self.claimant = claimant if isinstance(claimant, str) and claimant else None
         self.claimant_token = (
             claimant_token if isinstance(claimant_token, str) and claimant_token else None
         )
-        if self.claimant is not None:
-            self._publish_activity()
+        if self.claimant is None:
+            return True
+        # Retry once before declining execution. Continued execution gets
+        # further retries from each normal claim-renewal cycle.
+        return self._try_publish_activity() or self._try_publish_activity()
 
     def _publish_activity(self) -> None:
         if self.claimant is None:
@@ -888,17 +895,29 @@ class _ClaimLease:
             relay_crypto.seal(payload, self.key, aad=relay_crypto.aad_for("status", name)),
         )
 
+    def _try_publish_activity(self) -> bool:
+        """Publish Hive-facing progress without changing bucket-claim ownership."""
+        try:
+            self._publish_activity()
+            return True
+        except Exception:  # noqa: BLE001 — activity and claim writes are independent
+            log.exception("activity publication failed for %s", self.uuid)
+            return False
+
     def _renew(self) -> bool:
         if self._lost.is_set():
             return False
         with self._renew_lock:
             try:
                 renewed = self.relay.renew_claim(self.uuid, self.owner)
-                if renewed:
-                    self._publish_activity()
-            except Exception:  # noqa: BLE001 — loss is safer than a stale write
+            except Exception:  # noqa: BLE001 — an unknown claim result is ownership loss
                 log.exception("claim renewal failed for %s", self.uuid)
                 renewed = False
+            if renewed:
+                # A denied/transient status/active write must not turn a
+                # successful claim CAS into false ownership loss. The next
+                # renewal retries activity publication.
+                self._try_publish_activity()
         if not renewed:
             self._lost.set()
             log.error("claim ownership lost for %s", self.uuid)
@@ -1004,7 +1023,20 @@ def _process_claimed_job(
             lease=lease,
         )
         return 1
-    lease.set_claimant(claimant, claimant_token)
+    if not lease.set_claimant(claimant, claimant_token):
+        # Execution without a Hive-visible activity marker can outlive the Hive
+        # lease. Record a reconcilable failure while this worker still owns the
+        # bucket claim instead of stranding the pending object until expiry.
+        _write_terminal(
+            relay,
+            uuid,
+            {"status": "failed", "error": "could not publish node activity"},
+            key,
+            claimant=claimant,
+            claimant_token=claimant_token,
+            lease=lease,
+        )
+        return 1
     try:
         result = executor.execute(job)
         result.setdefault("status", "done")

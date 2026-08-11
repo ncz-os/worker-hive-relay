@@ -19,7 +19,7 @@ import time
 
 from . import relay_crypto
 from .bridge_common import HiveClaimError, HiveClient, backoff_sleep, mnemos_get, mnemos_search
-from .node_poller import NONCOMMIT_PREFIXES, repo_url_for_kind
+from .node_poller import NONCOMMIT_PREFIXES, repo_url_for_job, repo_url_for_kind
 from .relay_client import RelayClient
 
 log = logging.getLogger("node_relay.enqueuer")
@@ -63,20 +63,14 @@ def build_payload(job: dict) -> dict:
     context = exact_context + semantic_context
     claimed_resources = job.get("claimed_resources") or {}
     claimed_model = claimed_resources.get("model") if isinstance(claimed_resources, dict) else None
-    preferred_models = job.get("preferred_models") or []
     execution_model = claimed_model if claimed_model not in (None, "", "unknown") else None
-    if execution_model is None:
-        execution_model = next(
-            (model for model in preferred_models if isinstance(model, str) and model),
-            None,
-        )
     return {
         "job_id": job["id"],
         "kind": job.get("kind"),  # poller KIND_WORKSPACE_MAP needs it for repo mapping
         "prompt": prompt,
-        # Use the model Hive actually selected. Relay agents commonly register
-        # as "unknown", in which case the first ranked Hive preference becomes
-        # the node's deliberate execution choice.
+        # Use only a model Hive actually selected. ``preferred_models`` is a
+        # scheduling ranking, not an execution requirement; unresolved relay
+        # claims use the node executor's configured default model.
         "model": execution_model,
         # Both supported Hive variants persist and dequeue ``project``. Treat
         # it as the cross-version structured workspace identifier; the newer
@@ -93,22 +87,28 @@ def build_payload(job: dict) -> dict:
 def _node_should_offload(job: dict) -> bool:
     """The node only takes work it can actually complete.
 
-    Offload when the job is (a) explicitly host-targeted to this node, (b) a
-    no-commit kind (research/analysis/triage/etc. — answered via chat, no repo
-    needed), or (c) a kind the node poller can map to a repo. Everything else
-    (notably a general ``build:<repo>`` the relay can't map) is left for the
-    home fleet, which has the full repo map. This prevents the node from
-    claiming build jobs it cannot finish — they would otherwise zombie in
-    'running' or degrade to a useless chat suggestion.
+    Offload no-commit work without a repository. Commit-producing work must
+    resolve through the node's allowlist, including when it is explicitly
+    host-targeted. Everything else is left for the home fleet, which has the
+    full repo map. This prevents the node from claiming build jobs it cannot
+    finish — they would otherwise zombie in 'running' or degrade to a useless
+    chat suggestion.
     """
     host = _require_host().lower()
     kind = str(job.get("kind") or "")
     eligible_hosts = job.get("eligible_hosts") or []
-    if any(str(h).strip().lower() == host for h in eligible_hosts):
-        return True
     if kind.startswith(NONCOMMIT_PREFIXES):
         return True
-    return repo_url_for_kind(kind) is not None
+    if repo_url_for_kind(kind) is not None:
+        return True
+
+    # Host targeting controls placement, but cannot supply repository identity.
+    # Older Hive producers discard target_workspace and emit only project, so a
+    # host-targeted commit job is safe to claim only when its emitted structured
+    # workspace resolves locally. Otherwise release it for a worker with a full
+    # repository map instead of sealing an unexecutable job.
+    host_targeted = any(str(h).strip().lower() == host for h in eligible_hosts)
+    return host_targeted and repo_url_for_job(job) is not None
 
 
 def run_once(hive: HiveClient, relay: RelayClient, key: bytes) -> int:

@@ -72,8 +72,31 @@ class TestNodeShouldOffload:
         assert _node_should_offload({"kind": "research:foo"}) is True
         assert _node_should_offload({"kind": "analysis:bar"}) is True
 
-    def test_explicit_host_target_always_offloaded(self):
-        assert _node_should_offload({"kind": "build:anything", "eligible_hosts": ["node-x"]}) is True
+    def test_host_target_does_not_replace_missing_commit_workspace(self):
+        assert _node_should_offload({"kind": "code", "eligible_hosts": ["node-x"]}) is False
+
+    @pytest.mark.parametrize("field", ["project", "target_workspace"])
+    def test_host_targeted_commit_with_emitted_workspace_is_offloaded(self, field):
+        assert _node_should_offload(
+            {"kind": "code", "eligible_hosts": ["NODE-X"], field: "mnemos"}
+        ) is True
+
+    def test_host_targeted_noncommit_still_offloaded_without_workspace(self):
+        assert _node_should_offload(
+            {"kind": "research:anything", "eligible_hosts": ["node-x"]}
+        ) is True
+
+    @pytest.mark.parametrize(
+        "repo_fields",
+        [
+            {"repo": "https://gitlab.com/mnemos-os/mnemos.git"},
+            {"description": "make the change\nrepo: mnemos"},
+        ],
+    )
+    def test_host_targeted_existing_repo_contracts_remain_offloadable(self, repo_fields):
+        assert _node_should_offload(
+            {"kind": "code", "eligible_hosts": ["node-x"], **repo_fields}
+        ) is True
 
     def test_unmapped_unhosted_commit_kind_released(self):
         assert _node_should_offload({"kind": "build:unknown"}) is False

@@ -63,7 +63,7 @@ def test_payload_uses_real_hive_model_and_workspace_fields(monkeypatch):
 
     assert claimed["model"] == "claimed-model"
     assert claimed["workspace"] == "mnemos"
-    assert preferred["model"] == "preferred-model"
+    assert preferred["model"] is None
     assert preferred["workspace"] == "riskyeats"
 
 

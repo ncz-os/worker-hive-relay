@@ -209,5 +209,94 @@ def test_claimant_token_is_routed_but_not_exposed_to_executor(relay):
     assert terminal["_claimant_token"] == "agent-session-token"
 
 
+def test_activity_write_failure_records_terminal_without_executing():
+    from node_relay.node_poller import run_once
+
+    class ActivityDeniedBackend(InMemoryBackend):
+        def put(self, key, body):
+            if key.startswith("status/active/"):
+                raise PermissionError("active prefix denied")
+            super().put(key, body)
+
+    denied_relay = RelayClient(backend=ActivityDeniedBackend())
+    job = {
+        "job_id": "u1",
+        "prompt": "work",
+        "kind": "research:test",
+        "claimant_urn": "urn:hive",
+    }
+    denied_relay.put_pending(
+        "u1", relay_crypto.seal(job, KEY, aad=relay_crypto.aad_for("pending", "u1"))
+    )
+
+    class NeverExecutor:
+        def execute(self, _job):
+            raise AssertionError("job without activity must not execute")
+
+    assert run_once(denied_relay, KEY, NeverExecutor(), owner="worker-a") == 1
+    terminal = relay_crypto.open_blob(
+        denied_relay.get_terminal("u1"),
+        KEY,
+        aad=relay_crypto.aad_for("terminal", "u1"),
+    )
+    assert terminal["status"] == "failed"
+    assert terminal["claimant_urn"] == "urn:hive"
+
+
+def test_transient_activity_write_failure_is_retried_before_execution():
+    from node_relay.node_poller import run_once
+
+    class FailFirstActivityBackend(InMemoryBackend):
+        def __init__(self):
+            super().__init__()
+            self.activity_attempts = 0
+
+        def put(self, key, body):
+            if key.startswith("status/active/"):
+                self.activity_attempts += 1
+                if self.activity_attempts == 1:
+                    raise ConnectionError("transient activity failure")
+            super().put(key, body)
+
+    backend = FailFirstActivityBackend()
+    retry_relay = RelayClient(backend=backend)
+    job = {
+        "job_id": "u1",
+        "prompt": "work",
+        "kind": "research:test",
+        "claimant_urn": "urn:hive",
+    }
+    retry_relay.put_pending(
+        "u1", relay_crypto.seal(job, KEY, aad=relay_crypto.aad_for("pending", "u1"))
+    )
+
+    class Executor:
+        def execute(self, _job):
+            return {"status": "done"}
+
+    assert run_once(retry_relay, KEY, Executor(), owner="worker-a") == 1
+    terminal = relay_crypto.open_blob(
+        retry_relay.get_terminal("u1"),
+        KEY,
+        aad=relay_crypto.aad_for("terminal", "u1"),
+    )
+    assert terminal["status"] == "done"
+    assert backend.activity_attempts >= 2
+
+
+def test_activity_write_failure_does_not_lose_successfully_renewed_claim(relay):
+    from node_relay.node_poller import _ClaimLease
+
+    assert relay.claim("u1", "worker-a") is True
+    lease = _ClaimLease(relay, "u1", "worker-a", 60, KEY)
+    lease.claimant = "urn:hive"
+    relay.put_active = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        PermissionError("active prefix denied")
+    )
+
+    assert lease._renew() is True
+    assert lease.is_owned() is True
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
