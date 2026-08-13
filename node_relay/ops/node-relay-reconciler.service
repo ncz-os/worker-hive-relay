@@ -1,5 +1,5 @@
 [Unit]
-Description=node-relay reconciler (home side) — relay terminal/ -> land patch -> hive done
+Description=mnemos-node-relay reconciler (home side) — relay terminal/ -> land patch -> hive done
 After=network-online.target
 Wants=network-online.target
 

@@ -80,7 +80,7 @@ class HiveClient:
         session segment with its own uuid; subsequent claim/patch must use the
         returned URN or the agent reads as 'not registered'. ``metadata`` is
         merged into the role tag (e.g. specs.gpus so /v1/hosts surfaces it)."""
-        meta = {"role": "node-relay-bridge", **(metadata or {})}
+        meta = {"role": "mnemos-node-relay-bridge", **(metadata or {})}
         try:
             resp = self._session.post(
                 f"{self.base}/v1/agents/register",

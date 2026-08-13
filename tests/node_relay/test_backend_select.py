@@ -1,4 +1,4 @@
-"""node-relay backend selection: gs://, s3://, bare name, explicit override,
+"""mnemos-node-relay backend selection: gs://, s3://, bare name, explicit override,
 and legacy env fallback. Pure config logic — constructs no live client."""
 
 import importlib.metadata

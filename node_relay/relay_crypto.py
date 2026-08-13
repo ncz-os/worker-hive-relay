@@ -1,4 +1,4 @@
-"""End-to-end encryption for the node-relay cloud-object transport.
+"""End-to-end encryption for the mnemos-node-relay cloud-object transport.
 
 The relay bucket (GCS or S3) is a transport only; it must never see plaintext
 job payloads or MNEMOS context. Both endpoints — the home-fleet enqueuer/
@@ -31,7 +31,7 @@ MAGIC = b"NDR1"
 # Legacy magic written by the spark-relay generation of this code. Always
 # accepted on read so in-flight objects survive the rename. It can also be
 # WRITTEN (see ``_write_magic``) during a phased migration: if the home side is
-# upgraded to node-relay before a remote node is, set
+# upgraded to mnemos-node-relay before a remote node is, set
 # ``NODE_RELAY_WRITE_LEGACY_MAGIC=1`` so the still-old node — which only reads
 # SHR1 — keeps decrypting. Drop the flag once every participant is upgraded.
 LEGACY_MAGIC = b"SHR1"
@@ -141,7 +141,7 @@ def open_blob(blob: bytes, key: bytes, *, aad: bytes | None = None) -> dict[str,
         raise RelayCryptoError("blob too short")
     magic = blob[: len(MAGIC)]
     if magic != MAGIC and magic not in _LEGACY_MAGICS:
-        raise RelayCryptoError("bad magic — not a node-relay blob")
+        raise RelayCryptoError("bad magic — not a mnemos-node-relay blob")
     version = blob[len(MAGIC)]
     if version != VERSION:
         raise RelayCryptoError(f"unsupported relay version {version}")

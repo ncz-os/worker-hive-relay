@@ -1,5 +1,5 @@
 [Unit]
-Description=node-relay poller (remote node side) — relay pending/ -> execute -> terminal/
+Description=mnemos-node-relay poller (remote node side) — relay pending/ -> execute -> terminal/
 After=network-online.target
 Wants=network-online.target
 

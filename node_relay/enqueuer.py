@@ -292,7 +292,7 @@ def renew_active_jobs(hive: HiveClient, relay: RelayClient, key: bytes) -> int:
 
 
 def main(argv: list[str] | None = None) -> None:
-    ap = argparse.ArgumentParser(description="node-relay enqueuer (home side)")
+    ap = argparse.ArgumentParser(description="mnemos-node-relay enqueuer (home side)")
     ap.add_argument("--interval", type=float, default=15.0, help="poll seconds")
     ap.add_argument("--once", action="store_true", help="single drain then exit")
     args = ap.parse_args(argv)
@@ -301,7 +301,7 @@ def main(argv: list[str] | None = None) -> None:
     host = _require_host()
     key = relay_crypto.load_key()
     hive = HiveClient(
-        urn=f"urn:agent:system:{host}:node-relay-enqueuer",
+        urn=f"urn:agent:system:{host}:mnemos-node-relay-enqueuer",
         runtime="system",
         kind="system",
         host=host,

@@ -1,4 +1,4 @@
-# node-relay — systemd units
+# mnemos-node-relay — systemd units
 
 Three units. Two run on the **home fleet** (enqueuer + reconciler), one on the
 **remote node** (poller). All read secrets from an `EnvironmentFile` so nothing
@@ -19,7 +19,7 @@ optionally the bucket, and installs only the changed units):
 
 ## EnvironmentFile (manual)
 
-Create `~/.config/node-relay/relay.env` (mode 0600) on each host:
+Create `~/.config/mnemos-node-relay/relay.env` (mode 0600) on each host:
 
 ```ini
 # both sides — identical key on every participant
@@ -28,7 +28,7 @@ NODE_RELAY_BUCKET=gs://my-relay-bkt      # or s3://my-relay-bkt or a bare name
 # NODE_RELAY_BACKEND=gcs|s3              # optional; inferred from the scheme
 
 # GCP backend
-NODE_RELAY_GCS_SA=/home/<user>/.config/node-relay/relay-sa.json
+NODE_RELAY_GCS_SA=/home/<user>/.config/mnemos-node-relay/relay-sa.json
 # AWS / S3-compatible backend
 # AWS_REGION=us-east-1                   # creds via env / shared config / role
 # NODE_RELAY_S3_ENDPOINT=https://...     # only for non-AWS S3
@@ -54,19 +54,19 @@ the desired user, checkout, environment-file, and Python paths before copying,
 or use the bootstrap above to render them automatically.
 
 ```bash
-sudo cp node-relay-enqueuer.service node-relay-reconciler.service /etc/systemd/system/  # home
-sudo cp node-relay-poller.service /etc/systemd/system/                                  # node
+sudo cp mnemos-node-relay-enqueuer.service mnemos-node-relay-reconciler.service /etc/systemd/system/  # home
+sudo cp mnemos-node-relay-poller.service /etc/systemd/system/                                  # node
 sudo systemctl daemon-reload
-sudo systemctl enable --now node-relay-enqueuer node-relay-reconciler                    # home
-sudo systemctl enable --now node-relay-poller                                            # node
+sudo systemctl enable --now mnemos-node-relay-enqueuer mnemos-node-relay-reconciler                    # home
+sudo systemctl enable --now mnemos-node-relay-poller                                            # node
 ```
 
 To opt into the shared home runtime, render and install
-`node-relay-home.service`, then switch units explicitly:
+`mnemos-node-relay-home.service`, then switch units explicitly:
 
 ```bash
-sudo systemctl disable --now node-relay-enqueuer node-relay-reconciler
-sudo systemctl enable --now node-relay-home
+sudo systemctl disable --now mnemos-node-relay-enqueuer mnemos-node-relay-reconciler
+sudo systemctl enable --now mnemos-node-relay-home
 ```
 
 The checked-in units are templates. The bootstrap fills in the invoking user,

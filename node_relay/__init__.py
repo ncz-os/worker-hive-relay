@@ -1,4 +1,4 @@
-"""node-relay: E2EE cloud-object relay for network-isolated remote workers.
+"""mnemos-node-relay: E2EE cloud-object relay for network-isolated remote workers.
 
 Bridges a remote or airgapped node (internet egress only, no LAN/VPN to the
 home fleet) to the GRAEAE hive bus through a public-cloud object store (GCS or

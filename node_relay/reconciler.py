@@ -198,7 +198,7 @@ def run_once(hive: HiveClient, relay: RelayClient, key: bytes, lander: PatchLand
 
 
 def main(argv: list[str] | None = None) -> None:
-    ap = argparse.ArgumentParser(description="node-relay reconciler (home side)")
+    ap = argparse.ArgumentParser(description="mnemos-node-relay reconciler (home side)")
     ap.add_argument("--interval", type=float, default=15.0)
     ap.add_argument("--once", action="store_true")
     args = ap.parse_args(argv)
@@ -206,7 +206,7 @@ def main(argv: list[str] | None = None) -> None:
 
     key = relay_crypto.load_key()
     hive = HiveClient(
-        urn="urn:agent:system:pythia:node-relay-reconciler",
+        urn="urn:agent:system:pythia:mnemos-node-relay-reconciler",
         runtime="system",
         kind="system",
         host="pythia",

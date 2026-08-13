@@ -21,7 +21,7 @@ def test_reconciler_registers_as_worker_runtime(monkeypatch):
     monkeypatch.setattr(reconciler, "RelayClient", lambda: object())
     monkeypatch.setattr(reconciler, "PatchLander", lambda: object())
     monkeypatch.setattr(reconciler, "run_once", lambda *args: 0)
-    monkeypatch.setattr(sys, "argv", ["node-relay-reconciler", "--once"])
+    monkeypatch.setattr(sys, "argv", ["mnemos-node-relay-reconciler", "--once"])
 
     reconciler.main()
 
@@ -29,7 +29,7 @@ def test_reconciler_registers_as_worker_runtime(monkeypatch):
         (
             (),
             {
-                "urn": "urn:agent:system:pythia:node-relay-reconciler",
+                "urn": "urn:agent:system:pythia:mnemos-node-relay-reconciler",
                 "runtime": "system",
                 "kind": "system",
                 "host": "pythia",

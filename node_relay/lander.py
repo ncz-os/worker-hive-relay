@@ -191,7 +191,7 @@ class PatchLander:
     """Apply a node format-patch onto the canonical repo and push a review branch.
 
     Clones are cached per-repo under ``cache_dir`` (default
-    ``~/.cache/node-relay-lander``) so repeated landings only pay a fetch.
+    ``~/.cache/mnemos-node-relay-lander``) so repeated landings only pay a fetch.
     All operations on a cached clone hold a per-repo ``flock`` so concurrent
     reconcilers (or a sweep overlapping a slow push) cannot corrupt the
     shared worktree.
@@ -201,7 +201,7 @@ class PatchLander:
         self.cache_dir = Path(
             cache_dir
             or _env("NODE_RELAY_LANDER_CACHE", "SPARK_LANDER_CACHE")
-            or Path.home() / ".cache" / "node-relay-lander"
+            or Path.home() / ".cache" / "mnemos-node-relay-lander"
         )
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.cache_dir.chmod(0o700)  # clones + orphan patches are private code

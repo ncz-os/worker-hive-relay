@@ -1,4 +1,4 @@
-"""node-relay E2EE crypto tests: roundtrip, AAD binding, key handling, and
+"""mnemos-node-relay E2EE crypto tests: roundtrip, AAD binding, key handling, and
 backward-compatible decryption of the legacy ``SHR1`` magic."""
 
 import base64

@@ -1108,7 +1108,7 @@ def run_once(relay: RelayClient, key: bytes, executor: Executor, *, owner: str |
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="node-relay poller (remote node side)")
+    ap = argparse.ArgumentParser(description="mnemos-node-relay poller (remote node side)")
     ap.add_argument("--interval", type=float, default=10.0)
     ap.add_argument(
         "--executor",

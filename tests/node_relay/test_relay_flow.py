@@ -1,4 +1,4 @@
-"""node-relay queue flow + idempotency tests against an in-memory backend.
+"""mnemos-node-relay queue flow + idempotency tests against an in-memory backend.
 
 These exercise the exactly-once / lease / create-only / purge guarantees of
 :class:`RelayClient` without any GCS or S3 network — the in-memory backend

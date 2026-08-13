@@ -1,4 +1,4 @@
-# node-relay — E2EE public-cloud bridge for network-isolated workers
+# mnemos-node-relay — E2EE public-cloud bridge for network-isolated workers
 
 Integrates any **remote or airgapped node** as a hive worker even though it
 **cannot reach the home fleet** (no LAN, no VPN). The only requirement is that

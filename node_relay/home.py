@@ -18,7 +18,7 @@ log = logging.getLogger("node_relay.home")
 
 
 def main(argv: list[str] | None = None) -> None:
-    ap = argparse.ArgumentParser(description="combined node-relay home runtime")
+    ap = argparse.ArgumentParser(description="combined mnemos-node-relay home runtime")
     ap.add_argument("--enqueuer-interval", type=float, default=15.0)
     ap.add_argument("--reconciler-interval", type=float, default=15.0)
     args = ap.parse_args(argv)
@@ -36,13 +36,13 @@ def main(argv: list[str] | None = None) -> None:
         threading.Thread(
             target=run_role,
             args=("enqueuer", enqueuer.main, args.enqueuer_interval),
-            name="node-relay-enqueuer",
+            name="mnemos-node-relay-enqueuer",
             daemon=True,
         ),
         threading.Thread(
             target=run_role,
             args=("reconciler", reconciler.main, args.reconciler_interval),
-            name="node-relay-reconciler",
+            name="mnemos-node-relay-reconciler",
             daemon=True,
         ),
     ]

@@ -1,4 +1,4 @@
-"""Cloud-object transport for the node-relay queue (GCS or S3).
+"""Cloud-object transport for the mnemos-node-relay queue (GCS or S3.
 
 The relay is a tiny exactly-once job queue layered on a public-cloud object
 store. It works against any node that has internet egress but no LAN/VPN path

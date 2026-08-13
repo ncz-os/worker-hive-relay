@@ -1,4 +1,4 @@
-"""node-relay repo-resolution + offload-eligibility tests.
+"""mnemos-node-relay repo-resolution + offload-eligibility tests.
 
 Regression coverage for the ``build:<repo>`` mapping: the relay must understand
 the home-fleet ``build:<repo>`` convention (allowlist-resolved) as well as the

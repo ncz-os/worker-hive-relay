@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# node-relay idempotent bootstrap. Safe to run repeatedly: it never clobbers an
+# mnemos-node-relay idempotent bootstrap. Safe to run repeatedly: it never clobbers an
 # existing secret, never re-creates an existing bucket, and only (re)installs a
 # systemd unit when its content actually changed.
 #
@@ -14,7 +14,7 @@
 set -euo pipefail
 
 ROLE="${1:-env-only}"
-CFG_DIR="${NODE_RELAY_CONFIG_DIR:-$HOME/.config/node-relay}"
+CFG_DIR="${NODE_RELAY_CONFIG_DIR:-$HOME/.config/mnemos-node-relay}"
 ENV_FILE="$CFG_DIR/relay.env"
 UNIT_SRC="$(cd "$(dirname "$0")/ops" && pwd)"
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
@@ -23,7 +23,7 @@ SERVICE_USER="${NODE_RELAY_SERVICE_USER:-$(id -un)}"
 SERVICE_PY="${NODE_RELAY_SERVICE_PYTHON:-${VIRTUAL_ENV:+$VIRTUAL_ENV/bin/python}}"
 SERVICE_PY="${SERVICE_PY:-$REPO_DIR/.venv/bin/python}"
 
-log() { printf '[node-relay setup] %s\n' "$*"; }
+log() { printf '[mnemos-node-relay setup] %s\n' "$*"; }
 
 ensure_env_file() {
   mkdir -p "$CFG_DIR"
@@ -32,7 +32,7 @@ ensure_env_file() {
     log "creating $ENV_FILE (fill in the blanks; key generated below)"
     umask 077
     cat > "$ENV_FILE" <<'EOF'
-# node-relay environment (mode 0600). Secrets never go in the bucket or git.
+# mnemos-node-relay environment (mode 0600). Secrets never go in the bucket or git.
 # --- both sides ---
 NODE_RELAY_E2EE_KEY=
 # Bucket: bare name, gs://name, or s3://name. Backend inferred from scheme,
@@ -40,7 +40,7 @@ NODE_RELAY_E2EE_KEY=
 NODE_RELAY_BUCKET=
 # NODE_RELAY_BACKEND=gcs
 # --- GCP backend ---
-# NODE_RELAY_GCS_SA=/home/USER/.config/node-relay/relay-sa.json
+# NODE_RELAY_GCS_SA=/home/USER/.config/mnemos-node-relay/relay-sa.json
 # --- AWS / S3-compatible backend ---
 # AWS_REGION=us-east-1
 # (AWS creds via env / shared config / instance role; or:)
@@ -193,12 +193,12 @@ ensure_key
 case "$ROLE" in
   home)
     ensure_bucket
-    install_unit node-relay-enqueuer.service
-    install_unit node-relay-reconciler.service
+    install_unit mnemos-node-relay-enqueuer.service
+    install_unit mnemos-node-relay-reconciler.service
     ;;
   node)
     ensure_bucket
-    install_unit node-relay-poller.service
+    install_unit mnemos-node-relay-poller.service
     ;;
   env-only)
     log "env prepared; re-run with 'home' or 'node' to install units"

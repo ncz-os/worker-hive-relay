@@ -1,4 +1,4 @@
-# node-relay runtime deps. Install on BOTH the home side and the remote node:
+# mnemos-node-relay runtime deps. Install on BOTH the home side and the remote node:
 #   pip install -r node_relay/requirements.txt
 #
 # Base deps (always):

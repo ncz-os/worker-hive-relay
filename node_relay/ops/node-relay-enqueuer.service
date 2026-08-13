@@ -1,5 +1,5 @@
 [Unit]
-Description=node-relay enqueuer (home side) — hive jobs -> cloud relay bucket
+Description=mnemos-node-relay enqueuer (home side) — hive jobs -> cloud relay bucket
 After=network-online.target
 Wants=network-online.target
 
