@@ -34,6 +34,7 @@ from __future__ import annotations
 import json
 import os
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass
 
 _PENDING = "pending/"
@@ -95,6 +96,12 @@ class _Backend:
 
     def list_keys(self, prefix: str) -> list[str]:  # pragma: no cover - iface
         raise NotImplementedError
+
+    def iter_keys(self, prefix: str, *, start_after: str | None = None) -> Iterator[str]:
+        """Yield keys in lexical order. Backends override this to stream pages."""
+        for key in sorted(self.list_keys(prefix)):
+            if start_after is None or key > start_after:
+                yield key
 
     def delete(self, key: str) -> None:  # pragma: no cover - iface
         raise NotImplementedError
@@ -159,6 +166,14 @@ class GcsBackend(_Backend):
 
     def list_keys(self, prefix: str) -> list[str]:
         return [b.name for b in self._client.list_blobs(self._bucket, prefix=prefix)]
+
+    def iter_keys(self, prefix: str, *, start_after: str | None = None) -> Iterator[str]:
+        kwargs = {"prefix": prefix}
+        if start_after is not None:
+            kwargs["start_offset"] = start_after
+        for blob in self._client.list_blobs(self._bucket, **kwargs):
+            if start_after is None or blob.name > start_after:
+                yield blob.name
 
     def delete(self, key: str) -> None:
         try:
@@ -243,18 +258,22 @@ class S3Backend(_Backend):
         self._client.put_object(Bucket=self._bucket, Key=key, Body=body)
 
     def list_keys(self, prefix: str) -> list[str]:
-        keys: list[str] = []
+        return list(self.iter_keys(prefix))
+
+    def iter_keys(self, prefix: str, *, start_after: str | None = None) -> Iterator[str]:
         token: str | None = None
         while True:
             kw = {"Bucket": self._bucket, "Prefix": prefix}
             if token:
                 kw["ContinuationToken"] = token
+            elif start_after is not None:
+                kw["StartAfter"] = start_after
             resp = self._client.list_objects_v2(**kw)
-            keys.extend(obj["Key"] for obj in resp.get("Contents", []))
+            for obj in resp.get("Contents", []):
+                yield obj["Key"]
             if not resp.get("IsTruncated"):
                 break
             token = resp.get("NextContinuationToken")
-        return keys
 
     def delete(self, key: str) -> None:
         # S3 delete of a missing key is a no-op (204), so this is idempotent.
@@ -303,6 +322,7 @@ class RelayClient:
     """Backend-agnostic relay queue operations over a cloud object store."""
 
     def __init__(self, config: RelayConfig | None = None, backend: _Backend | None = None) -> None:
+        self._scan_cursors: dict[str, str] = {}
         if backend is not None:
             self._backend = backend
         else:
@@ -319,12 +339,33 @@ class RelayClient:
 
     # ---- node poller ----------------------------------------------------
     def list_pending(self) -> list[str]:
-        n = len(_PENDING)
-        return [
-            k[n : -len(_SUFFIX)]
-            for k in self._backend.list_keys(_PENDING)
-            if k.endswith(_SUFFIX)
-        ]
+        return list(self._iter_uuids(_PENDING))
+
+    def iter_pending(self, *, max_items: int) -> Iterator[str]:
+        return self._iter_uuids(_PENDING, max_items=max_items, rotate=True)
+
+    def _iter_uuids(
+        self, prefix: str, *, max_items: int | None = None, rotate: bool = False
+    ) -> Iterator[str]:
+        """Stream UUIDs, optionally resuming after the prior bounded sweep."""
+        if max_items is not None and max_items <= 0:
+            return
+        n = len(prefix)
+        cursor = self._scan_cursors.get(prefix) if rotate else None
+        yielded = 0
+        ranges = ((cursor, None), (None, cursor)) if cursor is not None else ((None, None),)
+        for start_after, stop_at in ranges:
+            for key in self._backend.iter_keys(prefix, start_after=start_after):
+                if stop_at is not None and key > stop_at:
+                    break
+                if not key.endswith(_SUFFIX):
+                    continue
+                if rotate:
+                    self._scan_cursors[prefix] = key
+                yield key[n : -len(_SUFFIX)]
+                yielded += 1
+                if max_items is not None and yielded >= max_items:
+                    return
 
     def claim(
         self,
@@ -414,12 +455,10 @@ class RelayClient:
 
     # ---- reconciler (home) ----------------------------------------------
     def list_terminal(self) -> list[str]:
-        n = len(_TERMINAL)
-        return [
-            k[n : -len(_SUFFIX)]
-            for k in self._backend.list_keys(_TERMINAL)
-            if k.endswith(_SUFFIX)
-        ]
+        return list(self._iter_uuids(_TERMINAL))
+
+    def iter_terminal(self, *, max_items: int) -> Iterator[str]:
+        return self._iter_uuids(_TERMINAL, max_items=max_items, rotate=True)
 
     def get_terminal(self, uuid: str) -> bytes:
         return self._backend.read(f"{_TERMINAL}{uuid}{_SUFFIX}")

@@ -39,6 +39,11 @@ def _env(*names: str, default: str | None = None) -> str | None:
 NODE_HOST = _env("NODE_RELAY_HOST", "SPARK_GPU_HOST")
 CONTEXT_LIMIT = 6
 HIVE_LEASE_SECONDS = float(_env("NODE_RELAY_HIVE_LEASE_SECONDS", default="1800"))
+DEFAULT_MAX_MNEMOS_REFS = 16
+DEFAULT_MAX_CONTEXT_BYTES = 2 * 1024 * 1024
+MAX_ACTIVE_SCAN_PER_SWEEP = int(
+    _env("NODE_RELAY_MAX_ACTIVE_SCAN_PER_SWEEP", default="10000")
+)
 
 
 def _require_host() -> str:
@@ -53,13 +58,56 @@ def _require_host() -> str:
 def build_payload(job: dict) -> dict:
     """Shape the sealed job the node will execute. Pre-packages MNEMOS context."""
     prompt = job.get("prompt") or job.get("task") or job.get("description", "")
-    exact_context = [mnemos_get(memory_id) for memory_id in (job.get("mnemos_refs") or [])]
+    mode = str(_env("NODE_RELAY_CONTEXT_MODE", default="semantic")).strip().lower()
+    if mode not in {"semantic", "fts", "exact", "off"}:
+        raise ValueError("NODE_RELAY_CONTEXT_MODE must be semantic, fts, exact, or off")
+
+    refs = [] if mode == "off" else (job.get("mnemos_refs") or [])
+    if not isinstance(refs, list):
+        raise ValueError("mnemos_refs must be a list")
+    max_refs = int(_env("NODE_RELAY_MAX_MNEMOS_REFS", default=str(DEFAULT_MAX_MNEMOS_REFS)))
+    if max_refs < 0:
+        raise ValueError("NODE_RELAY_MAX_MNEMOS_REFS must be non-negative")
+    if len(refs) > max_refs:
+        raise ValueError(f"mnemos_refs has {len(refs)} entries; limit is {max_refs}")
+
+    max_context_bytes = int(
+        _env("NODE_RELAY_MAX_CONTEXT_BYTES", default=str(DEFAULT_MAX_CONTEXT_BYTES))
+    )
+    if max_context_bytes <= 0:
+        raise ValueError("NODE_RELAY_MAX_CONTEXT_BYTES must be positive")
+
+    exact_context = []
+    context_bytes = 0
+    if mode != "off":
+        for memory_id in refs:
+            memory = mnemos_get(memory_id)
+            context_bytes += len(memory.get("content", "").encode("utf-8"))
+            if context_bytes > max_context_bytes:
+                raise ValueError(
+                    f"MNEMOS context exceeds {max_context_bytes} UTF-8 bytes"
+                )
+            exact_context.append(memory)
     exact_ids = {memory.get("id") for memory in exact_context}
-    semantic_context = [
-        memory
-        for memory in mnemos_search(prompt, limit=CONTEXT_LIMIT)
-        if memory.get("id") not in exact_ids
-    ]
+    skip_count = int(_env("NODE_RELAY_CONTEXT_SKIP_SEARCH_AT_COUNT", default="0"))
+    skip_bytes = int(_env("NODE_RELAY_CONTEXT_SKIP_SEARCH_AT_BYTES", default="0"))
+    exact_is_enough = (skip_count > 0 and len(exact_context) >= skip_count) or (
+        skip_bytes > 0 and context_bytes >= skip_bytes
+    )
+    search_context = []
+    if mode in {"semantic", "fts"} and not exact_is_enough:
+        if mode == "semantic":
+            search_context = mnemos_search(prompt, limit=CONTEXT_LIMIT)
+        else:
+            search_context = mnemos_search(prompt, limit=CONTEXT_LIMIT, semantic=False)
+    semantic_context = []
+    for memory in search_context:
+        if memory.get("id") in exact_ids:
+            continue
+        context_bytes += len(memory.get("content", "").encode("utf-8"))
+        if context_bytes > max_context_bytes:
+            raise ValueError(f"MNEMOS context exceeds {max_context_bytes} UTF-8 bytes")
+        semantic_context.append(memory)
     context = exact_context + semantic_context
     claimed_resources = job.get("claimed_resources") or {}
     claimed_model = claimed_resources.get("model") if isinstance(claimed_resources, dict) else None
@@ -201,7 +249,7 @@ def renew_active_jobs(hive: HiveClient, relay: RelayClient, key: bytes) -> int:
     """
     renewed = 0
     now = time.time()
-    for job_id in relay.list_pending():
+    for job_id in relay.iter_pending(max_items=MAX_ACTIVE_SCAN_PER_SWEEP):
         raw = relay.get_active(job_id)
         if raw is None:
             continue
@@ -243,11 +291,11 @@ def renew_active_jobs(hive: HiveClient, relay: RelayClient, key: bytes) -> int:
     return renewed
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(description="node-relay enqueuer (home side)")
     ap.add_argument("--interval", type=float, default=15.0, help="poll seconds")
     ap.add_argument("--once", action="store_true", help="single drain then exit")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
 
     host = _require_host()

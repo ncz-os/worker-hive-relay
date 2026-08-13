@@ -85,6 +85,20 @@ def test_mnemos_malformed_payload_is_not_empty_context(monkeypatch):
         mnemos_search("context")
 
 
+def test_mnemos_fts_mode_disables_semantic_search(monkeypatch):
+    requests_seen = []
+    response = _Response(200, payload={"memories": []})
+    response.raise_for_status = lambda: None
+
+    def post(*args, **kwargs):
+        requests_seen.append(kwargs["json"])
+        return response
+
+    monkeypatch.setattr(requests, "post", post)
+    assert mnemos_search("context", semantic=False) == []
+    assert requests_seen == [{"query": "context", "limit": 6, "semantic": False}]
+
+
 def test_registration_failure_is_fatal():
     hive = _hive_with_response(_Response(503, text="unavailable"))
     with pytest.raises(HiveRegistrationError, match="503"):

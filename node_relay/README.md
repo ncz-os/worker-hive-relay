@@ -29,6 +29,7 @@ server. The single terminal object per job is likewise create-only.
 | `bridge_common.py` | home | hive + MNEMOS HTTP clients, backoff |
 | `enqueuer.py` | home | drain eligible hive jobs → bucket |
 | `reconciler.py` | home | bucket terminal → land review branch → hive status |
+| `home.py` | home | optional combined enqueuer + reconciler threaded runtime |
 | `lander.py` | home | apply a node patch and push `hive/node-<jobid>` (idempotent) |
 | `node_poller.py` | node | claim + execute via pluggable `Executor` (local or cloud LLM) |
 
@@ -75,6 +76,8 @@ Every `NODE_RELAY_*` variable falls back to its legacy `SPARK_*` /
 # home
 python -m node_relay.enqueuer   --interval 15
 python -m node_relay.reconciler --interval 15
+# or, after stopping the two separate home processes:
+python -m node_relay.home --enqueuer-interval 15 --reconciler-interval 15
 # remote node
 python -m node_relay.node_poller --interval 10 --executor local+cloud
 ```
@@ -83,6 +86,15 @@ python -m node_relay.node_poller --interval 10 --executor local+cloud
 `--executor` is `local | cloud | local+cloud | cloud+local | auto`; the cloud
 fallback is a generic OpenAI-compatible endpoint (`CLOUD_LLM_*`) — no vendor
 lock-in.
+
+The defaults preserve the existing semantic-context behavior. Operators can
+select `NODE_RELAY_CONTEXT_MODE=fts|exact|off`; `semantic` remains the default.
+Explicit context is bounded by `NODE_RELAY_MAX_MNEMOS_REFS` (default 16) and
+`NODE_RELAY_MAX_CONTEXT_BYTES` (default 2 MiB). Prefix sweeps stream objects and
+rotate after `NODE_RELAY_MAX_SCAN_PER_SWEEP` or
+`NODE_RELAY_MAX_TERMINAL_SCAN_PER_SWEEP` keys; active-job renewal uses
+`NODE_RELAY_MAX_ACTIVE_SCAN_PER_SWEEP` (all default 10,000). The lander cache is
+capped by `NODE_RELAY_LANDER_CACHE_MAX_BYTES` (default 50 GiB).
 
 ## Executor integration
 

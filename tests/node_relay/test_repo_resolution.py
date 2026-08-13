@@ -8,9 +8,16 @@ Pure unit tests: no GCS / S3 / network / model needed.
 
 import pytest
 
+from node_relay.lander import PatchLander
 from node_relay import enqueuer
 from node_relay.enqueuer import _node_should_offload
-from node_relay.node_poller import AgenticRepoExecutor, make_executor, repo_url_for_kind, repo_aliases
+from node_relay.node_poller import (
+    AgenticRepoExecutor,
+    FallbackExecutor,
+    make_executor,
+    repo_aliases,
+    repo_url_for_kind,
+)
 
 
 class _DummyChat:
@@ -197,6 +204,46 @@ class TestRepositoryExecutorPolicy:
         ex._request_changes(job, "file.py", "")
 
         assert [call["model"] for call in calls] == ["submitter-model", "submitter-model"]
+
+    def test_fallback_bypasses_failed_backend_for_rest_of_job(self):
+        calls = []
+
+        class Chat(_DummyChat):
+            def __init__(self, label, fails=False):
+                self.label = label
+                self.default_model = label
+                self.timeout = 1
+                self.fails = fails
+
+            def complete(self, **kwargs):
+                calls.append(self.label)
+                if self.fails:
+                    raise TimeoutError(self.label)
+                return "ok"
+
+        fallback = FallbackExecutor([("local", Chat("local", True)), ("cloud", Chat("cloud"))])
+        fallback.begin_job()
+        assert fallback.complete(user="first") == "ok"
+        assert fallback.complete(user="second") == "ok"
+        fallback.end_job()
+        assert fallback.complete(user="next-job") == "ok"
+        assert calls == ["local", "cloud", "cloud", "local", "cloud"]
+
+
+def test_lander_cache_cap_evicts_oldest_unused_clone(monkeypatch, tmp_path):
+    monkeypatch.setenv("NODE_RELAY_LANDER_CACHE_MAX_BYTES", "10")
+    lander = PatchLander(cache_dir=str(tmp_path))
+    old = tmp_path / "old"
+    current = tmp_path / "current"
+    for clone in (old, current):
+        (clone / ".git").mkdir(parents=True)
+        (clone / "payload").write_bytes(b"123456")
+
+    lander._prune_cache(exclude=current)
+
+    assert not old.exists()
+    assert current.exists()
+    assert lander.orphan_dir.exists()
 
 
 if __name__ == "__main__":

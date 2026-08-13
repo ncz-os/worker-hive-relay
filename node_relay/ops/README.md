@@ -4,6 +4,11 @@ Three units. Two run on the **home fleet** (enqueuer + reconciler), one on the
 **remote node** (poller). All read secrets from an `EnvironmentFile` so nothing
 sensitive lives in the unit or the repo.
 
+`node-relay-home.service` is an optional replacement for both home units. It
+runs the roles in separate threads under one Python interpreter. Disable the
+enqueuer and reconciler units before enabling it; the bootstrap intentionally
+keeps installing the existing separate units by default.
+
 The quickest path is the idempotent bootstrap (creates the env file + key,
 optionally the bucket, and installs only the changed units):
 
@@ -54,6 +59,14 @@ sudo cp node-relay-poller.service /etc/systemd/system/                          
 sudo systemctl daemon-reload
 sudo systemctl enable --now node-relay-enqueuer node-relay-reconciler                    # home
 sudo systemctl enable --now node-relay-poller                                            # node
+```
+
+To opt into the shared home runtime, render and install
+`node-relay-home.service`, then switch units explicitly:
+
+```bash
+sudo systemctl disable --now node-relay-enqueuer node-relay-reconciler
+sudo systemctl enable --now node-relay-home
 ```
 
 The checked-in units are templates. The bootstrap fills in the invoking user,

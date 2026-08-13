@@ -209,6 +209,11 @@ class PatchLander:
         self.orphan_dir.mkdir(exist_ok=True)
         self.orphan_dir.chmod(0o700)
         self.git_timeout = float(_env("NODE_RELAY_LANDER_GIT_TIMEOUT", "SPARK_LANDER_GIT_TIMEOUT", default="300"))
+        self.cache_max_bytes = int(
+            _env("NODE_RELAY_LANDER_CACHE_MAX_BYTES", default=str(50 * 1024**3))
+        )
+        if self.cache_max_bytes <= 0:
+            raise ValueError("NODE_RELAY_LANDER_CACHE_MAX_BYTES must be positive")
         self._askpass = self.cache_dir / "askpass.sh"
         self._askpass.write_text(_ASKPASS_SCRIPT)
         self._askpass.chmod(stat.S_IRWXU)
@@ -387,6 +392,8 @@ class PatchLander:
             if proc.returncode != 0:
                 err = _redact_secrets((proc.stderr or proc.stdout).strip()[-400:])
                 raise _classify_git_failure(err)(f"fetch failed: {err}")
+            os.utime(clone, None)
+            self._prune_cache(exclude=clone)
             return clone
         if clone.exists():
             # Leftover of a clone that crashed/timed out before completing —
@@ -415,7 +422,50 @@ class PatchLander:
             err = _redact_secrets((proc.stderr or proc.stdout).strip()[-400:])
             raise _classify_git_failure(err)(f"clone failed: {err}")
         tmp.rename(clone)
+        self._prune_cache(exclude=clone)
         return clone
+
+    @staticmethod
+    def _tree_size(path: Path) -> int:
+        total = 0
+        for root, _dirs, files in os.walk(path):
+            for name in files:
+                try:
+                    total += (Path(root) / name).stat(follow_symlinks=False).st_size
+                except FileNotFoundError:
+                    pass
+        return total
+
+    def _prune_cache(self, *, exclude: Path) -> None:
+        """Evict least-recently-used clones until the configured cap is met.
+
+        A non-blocking per-repository lock prevents pruning a clone another
+        local reconciler is using. Orphan patches are never included or evicted.
+        """
+        candidates: list[tuple[float, int, Path]] = []
+        total = 0
+        for path in self.cache_dir.iterdir():
+            if path == exclude or not path.is_dir() or not (path / ".git").is_dir():
+                continue
+            size = self._tree_size(path)
+            total += size
+            candidates.append((path.stat().st_mtime, size, path))
+        if exclude.is_dir():
+            total += self._tree_size(exclude)
+        for _mtime, size, path in sorted(candidates):
+            if total <= self.cache_max_bytes:
+                break
+            lock_path = path.with_suffix(".lock")
+            with open(lock_path, "w") as lock_fh:
+                try:
+                    fcntl.flock(lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    continue
+                shutil.rmtree(path, ignore_errors=True)
+                fcntl.flock(lock_fh, fcntl.LOCK_UN)
+            if not path.exists():
+                total -= size
+                log.info("evicted lander cache clone %s (%d bytes)", path.name, size)
 
     def _default_branch(self, clone: Path) -> str:
         proc = self._git(clone, ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"], check=False)

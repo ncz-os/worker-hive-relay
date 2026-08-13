@@ -65,6 +65,7 @@ def _redact_secrets(text):
 # Fairness cap: per sweep, claim at most N jobs so one node does NOT drain the
 # queue — overflow spills to the home fleet. Tune via NODE_RELAY_MAX_PER_SWEEP.
 MAX_PER_SWEEP = int(_env("NODE_RELAY_MAX_PER_SWEEP", "SPARK_MAX_PER_SWEEP", default="4"))
+MAX_SCAN_PER_SWEEP = int(_env("NODE_RELAY_MAX_SCAN_PER_SWEEP", default="10000"))
 
 # This node's identity (claim owner + hive host id). No vendor default: falls
 # back to the OS hostname so any node works out of the box.
@@ -310,14 +311,24 @@ class FallbackExecutor:
         self.label = "+".join(name for name, _ex in chain)
         self.default_model = chain[0][1].default_model
         self.timeout = chain[0][1].timeout
+        self._failed_for_job: set[str] = set()
+
+    def begin_job(self) -> None:
+        self._failed_for_job.clear()
+
+    def end_job(self) -> None:
+        self._failed_for_job.clear()
 
     def complete(self, **kwargs) -> str:
         errors = []
         for name, ex in self.chain:
+            if name in self._failed_for_job:
+                continue
             try:
                 return ex.complete(**kwargs)
             except Exception as exc:  # noqa: BLE001 — try the next backend
                 log.warning("executor %s failed, trying next: %s", name, exc)
+                self._failed_for_job.add(name)
                 errors.append(f"{name}: {exc}")
         raise RuntimeError("all executors failed: " + " | ".join(errors))
 
@@ -347,6 +358,17 @@ class AgenticRepoExecutor:
         )
 
     def execute(self, job: dict) -> dict:
+        begin = getattr(self.chat, "begin_job", None)
+        end = getattr(self.chat, "end_job", None)
+        if begin is not None:
+            begin()
+        try:
+            return self._execute(job)
+        finally:
+            if end is not None:
+                end()
+
+    def _execute(self, job: dict) -> dict:
         repo_url = self._resolve_repo_url(job)
         if not repo_url:
             return {
@@ -1071,7 +1093,7 @@ def run_once(relay: RelayClient, key: bytes, executor: Executor, *, owner: str |
         _env("NODE_RELAY_LEASE_SECONDS", "SPARK_LEASE_SECONDS", default=str(DEFAULT_LEASE_SECONDS))
     )
     done = 0
-    for uuid in relay.list_pending():
+    for uuid in relay.iter_pending(max_items=MAX_SCAN_PER_SWEEP):
         if done >= MAX_PER_SWEEP:
             break
         if not relay.claim(uuid, owner, lease_seconds=lease_seconds):

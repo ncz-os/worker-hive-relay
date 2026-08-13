@@ -79,6 +79,15 @@ def test_pending_put_list_get_roundtrip(relay):
     assert got["prompt"] == "hi"
 
 
+def test_bounded_pending_scan_rotates_without_starving_later_keys(relay):
+    for uuid in ("u1", "u2", "u3"):
+        relay.put_pending(uuid, b"sealed")
+
+    assert list(relay.iter_pending(max_items=2)) == ["u1", "u2"]
+    assert list(relay.iter_pending(max_items=2)) == ["u3", "u1"]
+    assert list(relay.iter_pending(max_items=2)) == ["u2", "u3"]
+
+
 def test_claim_is_exactly_once(relay):
     assert relay.claim("u1", "worker-a") is True
     assert relay.claim("u1", "worker-b") is False  # already held, lease live

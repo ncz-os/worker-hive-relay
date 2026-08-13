@@ -39,6 +39,45 @@ def test_payload_includes_exact_refs_before_deduplicated_semantic_context(monkey
     ]
 
 
+def test_context_modes_preserve_semantic_default_and_allow_fts_exact_off(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        enqueuer, "mnemos_get", lambda memory_id: {"id": memory_id, "content": "exact"}
+    )
+
+    def search(query, limit, *, semantic=True):
+        calls.append(semantic)
+        return [{"id": "search", "content": "found"}]
+
+    monkeypatch.setattr(enqueuer, "mnemos_search", search)
+    job = {"id": "job-1", "description": "work", "mnemos_refs": ["ref"]}
+
+    assert len(enqueuer.build_payload(job)["context"]) == 2
+    monkeypatch.setenv("NODE_RELAY_CONTEXT_MODE", "fts")
+    assert len(enqueuer.build_payload(job)["context"]) == 2
+    monkeypatch.setenv("NODE_RELAY_CONTEXT_MODE", "exact")
+    assert enqueuer.build_payload(job)["context"] == [{"id": "ref", "content": "exact"}]
+    monkeypatch.setenv("NODE_RELAY_CONTEXT_MODE", "off")
+    job["mnemos_refs"] = [f"ref-{index}" for index in range(100)]
+    assert enqueuer.build_payload(job)["context"] == []
+    assert calls == [True, False]
+
+
+def test_context_reference_count_and_byte_budgets_are_enforced(monkeypatch):
+    monkeypatch.setenv("NODE_RELAY_MAX_MNEMOS_REFS", "1")
+    with pytest.raises(ValueError, match="2 entries"):
+        enqueuer.build_payload({"id": "job", "mnemos_refs": ["one", "two"]})
+
+    monkeypatch.setenv("NODE_RELAY_MAX_MNEMOS_REFS", "2")
+    monkeypatch.setenv("NODE_RELAY_MAX_CONTEXT_BYTES", "3")
+    monkeypatch.setenv("NODE_RELAY_CONTEXT_MODE", "exact")
+    monkeypatch.setattr(
+        enqueuer, "mnemos_get", lambda memory_id: {"id": memory_id, "content": "four"}
+    )
+    with pytest.raises(ValueError, match="UTF-8 bytes"):
+        enqueuer.build_payload({"id": "job", "mnemos_refs": ["one"]})
+
+
 def test_payload_uses_real_hive_model_and_workspace_fields(monkeypatch):
     monkeypatch.setattr(enqueuer, "mnemos_search", lambda query, limit: [])
 

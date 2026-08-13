@@ -240,7 +240,9 @@ class HiveClient:
             return None
 
 
-def mnemos_search(query: str, limit: int = 6) -> list[dict[str, Any]]:
+def mnemos_search(
+    query: str, limit: int = 6, *, semantic: bool = True
+) -> list[dict[str, Any]]:
     """Retrieve relevant MNEMOS context for context-prepackaging.
 
     Returns a list of ``{"id", "content"}`` dicts. A legitimate empty result
@@ -254,7 +256,7 @@ def mnemos_search(query: str, limit: int = 6) -> list[dict[str, Any]]:
     try:
         resp = requests.post(
             f"{MNEMOS_BASE}/v1/memories/search",
-            json={"query": query, "limit": limit, "semantic": True},
+            json={"query": query, "limit": limit, "semantic": semantic},
             headers=headers,
             timeout=_TIMEOUT,
         )

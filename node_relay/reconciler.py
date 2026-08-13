@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import time
 
 from . import relay_crypto
@@ -24,6 +25,7 @@ log = logging.getLogger("node_relay.reconciler")
 
 MAX_RESULT_BYTES = 256 * 1024
 TERMINAL_STATUSES = {"done", "failed", "needs-review"}
+MAX_SCAN_PER_SWEEP = int(os.environ.get("NODE_RELAY_MAX_TERMINAL_SCAN_PER_SWEEP", "10000"))
 
 
 def _json_size_bytes(value: object) -> int:
@@ -184,7 +186,7 @@ def _reconcile_one(
 
 def run_once(hive: HiveClient, relay: RelayClient, key: bytes, lander: PatchLander) -> int:
     count = 0
-    for uuid in relay.list_terminal():
+    for uuid in relay.iter_terminal(max_items=MAX_SCAN_PER_SWEEP):
         try:
             if _reconcile_one(hive, relay, key, uuid, lander):
                 count += 1
@@ -195,11 +197,11 @@ def run_once(hive: HiveClient, relay: RelayClient, key: bytes, lander: PatchLand
     return count
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(description="node-relay reconciler (home side)")
     ap.add_argument("--interval", type=float, default=15.0)
     ap.add_argument("--once", action="store_true")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
 
     key = relay_crypto.load_key()
