@@ -2,6 +2,10 @@
 name = "mnemos-node-relay"
 version = "0.2.0"
 description = "E2EE public-cloud object relay bridging network-isolated remote workers (any node with internet egress, no LAN/VPN) to the GRAEAE hive bus"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "MNEMOS Contributors" }]
+maintainers = [{ name = "Jason Perlow", email = "jperlow@gmail.com" }]
 requires-python = ">=3.10"
 dependencies = ["cryptography>=42.0.0", "requests>=2.31.0"]
 
